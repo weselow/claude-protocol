@@ -82,6 +82,21 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
   unticked, the worktree has uncommitted changes, or the branch is not on
   origin at the worktree's commit. An origin that cannot be reached does not
   block. The comment, status and length checks are gone.
+- **Worktrees of merged branches are reported again** — the session-start
+  check asked git about a branch literally called `main`, could not see a
+  squash-merged pull request, and missed every worktree branch anyway,
+  because git lists those with a `+ ` in front. It never fired and never
+  said why. The main branch now comes from `origin/HEAD` (origin's copy
+  first). Merged branches come from git — counted only when the branch tip
+  is a commit made on it, so a fresh branch or an undone commit does not
+  count — and from one `gh pr list --state merged` about origin, counted
+  only when the pull request went into the main branch and contains the
+  worktree's tip (the latest 200 merges are seen). When neither answers,
+  the session is told. `git worktree remove`, without `--force`, is
+  suggested only for an unlocked worktree git reads as clean — untracked
+  files, skip-worktree and assume-unchanged changes and submodules
+  included — and the hint says that ignored files such as `.env` go with
+  it. The bead id is printed only when bd confirms it.
 
 ### v3.9.2 (2026-09-07)
 

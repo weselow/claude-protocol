@@ -12,7 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  injectText, execCommand, getProjectDir, runHook,
+  injectText, execCommand, execCommandJSON, getProjectDir, runHook,
   parseBdVersion, versionBelow, BD_MIN_VERSION,
   hasBeads, isPluginInstall, readOwnVersion, updateNotice,
   leftoverProjectHooks,
@@ -119,34 +119,331 @@ function collectDirtyWarning(repoRoot, output) {
   output.push('');
 }
 
-/** A merged branch whose worktree and bead are still around. */
+/**
+ * A .worktrees/bd-* worktree whose branch was merged, and its bead.
+ *
+ * For a long time this check never fired, and nothing said so: it asked git
+ * about a branch literally called main, git ancestry cannot see a squash
+ * merge, and the plain `git branch` listing marks every worktree's branch with
+ * "+ ", so no name ever matched. A check that fails quietly looks exactly like
+ * one with nothing to report — when neither source can answer, that is said.
+ */
 function collectMergedWorktrees(projectDir, repoRoot, output) {
   if (!repoRoot || !fs.existsSync(path.join(projectDir, '.worktrees'))) return;
 
-  const worktreeList = execCommand('git', ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
-  if (!worktreeList) return;
+  const worktrees = listBeadWorktrees(repoRoot);
+  if (worktrees.length === 0) return;
 
-  const worktreeLines = worktreeList.split('\n')
-    .filter(line => line.startsWith('worktree ') && line.includes('.worktrees/bd-'));
+  // Both sources measure against the main branch; without one, neither can.
+  const main = resolveMainBranch(repoRoot);
+  const sources = {
+    github: main && mergedPullRequests(repoRoot, main.name),
+    git: main && branchesMergedInGit(repoRoot, main.ref, worktrees.map(w => w.branch)),
+  };
+  if (!sources.github && !sources.git) return warnNobodyAnswered(output);
 
-  // Hoist git branch --merged outside the loop (was called per-worktree before)
-  const merged = execCommand('git', ['-C', repoRoot, 'branch', '--merged', 'main']);
-  const mergedBranches = merged
-    ? merged.split('\n').map(b => b.trim().replace(/^\*\s*/, ''))
-    : [];
+  const found = worktrees
+    .map(worktree => ({ ...worktree, verdict: mergeVerdict(repoRoot, worktree, sources) }))
+    .filter(worktree => worktree.verdict);
+  if (found.length === 0) return;
 
-  for (const line of worktreeLines) {
-    const wtPath = line.replace('worktree ', '').trim();
-    const dirName = path.basename(wtPath);
-
-    // Exact match prevents bd-1 matching bd-10
-    if (!mergedBranches.includes(dirName)) continue;
-
-    const beadId = dirName.replace('bd-', '');
-    output.push(`ACTION REQUIRED: ${dirName} was merged but bead "${beadId}" is still open.`);
-    output.push(`   Run: bd close "${beadId}" && git worktree remove "${wtPath}"`);
-    output.push('');
+  const beads = confirmedBeads(found.map(worktree => worktree.beadGuess));
+  for (const worktree of found) {
+    reportMergedWorktree(worktree, beads.get(worktree.beadGuess), output);
   }
+}
+
+function warnNobodyAnswered(output) {
+  output.push('WARNING: could not tell which .worktrees/bd-* branches were merged.');
+  output.push('   Neither GitHub (merged pull requests of origin) nor git (branches');
+  output.push('   merged into the main branch) answered, so leftover worktrees go');
+  output.push('   unreported.');
+  output.push('');
+}
+
+/**
+ * Worktrees under .worktrees/bd-*, each with its branch, tip, lock, and
+ * whether any other worktree lies inside it — `bd worktree create` run from
+ * within a worktree nests the new one there.
+ */
+function listBeadWorktrees(repoRoot) {
+  const list = execCommand('git', ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
+  if (!list) return [];
+  const entries = list.split(/\r?\n\r?\n/).map(parseWorktreeEntry);
+  return entries.filter(entry => entry.ours).map(entry => ({
+    ...entry,
+    holdsWorktree: entries.some(other => other.path && liesInside(other.path, entry.path)),
+  }));
+}
+
+/** One `git worktree list --porcelain` entry; `ours` marks a bd-* worktree. */
+function parseWorktreeEntry(entry) {
+  const lines = entry.split(/\r?\n/);
+  const field = (name) => {
+    const line = lines.find(candidate => candidate.startsWith(`${name} `));
+    return line ? line.slice(name.length + 1) : '';
+  };
+  const where = field('worktree');
+  const ref = field('branch');
+  // A detached worktree has no branch that could have been merged.
+  const branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : '';
+  return {
+    path: where,
+    ours: where.includes('.worktrees/bd-') && branch !== '',
+    branch,
+    head: field('HEAD'),
+    locked: lines.some(line => line === 'locked' || line.startsWith('locked ')),
+    beadGuess: branch.startsWith('bd-') ? branch.slice('bd-'.length) : '',
+  };
+}
+
+/** True when path `inner` lies somewhere below path `outer`. */
+function liesInside(inner, outer) {
+  const tidy = (p) => {
+    const slashes = p.replace(/\\/g, '/').replace(/\/+$/, '');
+    return process.platform === 'win32' ? slashes.toLowerCase() : slashes;
+  };
+  return tidy(inner).startsWith(`${tidy(outer)}/`);
+}
+
+/**
+ * 'merged', 'unconfirmed' (looks merged, but there is no reflog to check it
+ * against), or null.
+ *
+ * Neither source is taken at its word. git lists every branch whose tip sits
+ * on the main branch's history — a fresh one, or one whose commit was undone
+ * with `git reset` — so its answer counts only when the tip is a commit made
+ * on this branch. GitHub knows branch names, and short names come back, so a
+ * pull request counts only when it was merged with this tip in it, and only
+ * for a branch someone has committed on.
+ */
+function mergeVerdict(repoRoot, worktree, sources) {
+  const claims = mergeClaims(repoRoot, worktree, sources);
+  if (!claims.git && !claims.github) return null;
+
+  const history = branchHistory(repoRoot, worktree);
+  if (!history) return 'unconfirmed';
+  const confirmed = (claims.git && history.tipCommitted)
+    || (claims.github && history.everCommitted);
+  return confirmed ? 'merged' : null;
+}
+
+/** Which sources say this worktree's branch was merged. */
+function mergeClaims(repoRoot, worktree, sources) {
+  const pullRequests = sources.github || [];
+  return {
+    git: Boolean(sources.git && sources.git.has(worktree.branch)),
+    github: pullRequests.some(pr => pr.headRefName === worktree.branch
+      && pullRequestContains(repoRoot, pr.headRefOid, worktree.head)),
+  };
+}
+
+/** True when a merged pull request's head is this tip or comes after it. */
+function pullRequestContains(repoRoot, prHead, tip) {
+  if (!tip || typeof prHead !== 'string' || !/^[0-9a-f]{40,64}$/.test(prHead)) return false;
+  if (prHead === tip) return true;
+  // null is both "not an ancestor" and "that commit is not here at all".
+  return execCommand('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', tip, prHead]) !== null;
+}
+
+/**
+ * What the branch's own reflog says about commits made on it, or null when
+ * there is no reflog: gc expires it after 90 days, and
+ * core.logAllRefUpdates=false never writes one.
+ */
+function branchHistory(repoRoot, worktree) {
+  const reflog = execCommand('git', [
+    '-C', repoRoot, 'reflog', 'show', '--format=%H %gs', `refs/heads/${worktree.branch}`, '--',
+  ]);
+  if (!reflog) return null;
+
+  // "<hash> commit: ...", "<hash> commit (amend): ..." — not reset, merge,
+  // rebase or the branch's creation, which move it without making anything.
+  const commits = reflog.split(/\r?\n/)
+    .map(line => line.split(' '))
+    .filter(([, action]) => action && action.startsWith('commit'));
+  return {
+    everCommitted: commits.length > 0,
+    tipCommitted: commits.some(([hash]) => hash === worktree.head),
+  };
+}
+
+/**
+ * Pull requests of origin merged into `mainName`, or null when GitHub could
+ * not be asked.
+ *
+ * Always about origin by name: without a default repository set, gh picks the
+ * fork's parent on its own and answers with an empty list, which looks
+ * exactly like "nothing merged". One question for all worktrees — asking per
+ * branch took seconds each — so only the latest 200 merges are seen; a
+ * squash merge older than that goes unreported.
+ */
+function mergedPullRequests(repoRoot, mainName) {
+  const repo = githubRepo(repoRoot);
+  if (!repo) return null;
+
+  const prs = execCommandJSON('gh', [
+    'pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '200',
+    '--json', 'headRefName,headRefOid,baseRefName',
+  ]);
+  if (!Array.isArray(prs)) return null;
+  return prs.filter(pr => pr && typeof pr.headRefName === 'string'
+    && pr.baseRefName === mainName);
+}
+
+/**
+ * owner/name of origin when origin is on GitHub, or null. Takes https and ssh
+ * URLs, the scp form (git@github.com:o/n), a port, ssh.github.com, an ssh
+ * host alias written as github.com-<name>, any letter case, with or without
+ * .git. GitHub Enterprise hosts are not recognised.
+ */
+function githubRepo(repoRoot) {
+  const url = execCommand('git', ['-C', repoRoot, 'remote', 'get-url', 'origin']) || '';
+  const match = /^(?:[a-z][\w+.-]*:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i
+    .exec(url);
+  const onGitHub = match && /^(?:ssh\.|www\.)?github\.com(?:-[\w.-]+)?$/i.test(match[1]);
+  return onGitHub ? `${match[2]}/${match[3]}` : null;
+}
+
+/** Those of `candidates` git lists as merged into `mainRef`, or null. */
+function branchesMergedInGit(repoRoot, mainRef, candidates) {
+  // --format, not the plain listing: that one marks a branch checked out in
+  // another worktree with "+ ", and every bd-* branch here is one.
+  const merged = execCommand('git', [
+    '-C', repoRoot, 'branch', '--format=%(refname:short)', '--merged', mainRef,
+  ]);
+  if (merged === null) return null;
+  return new Set(merged.split(/\r?\n/).map(name => name.trim())
+    .filter(name => candidates.includes(name)));
+}
+
+/**
+ * The main branch: its name, and the ref to measure merges against. The name
+ * comes from origin/HEAD, as a clone records it; without it, main before
+ * master — a repository carrying both has usually moved to main and kept the
+ * old one around. origin's copy is the ref of choice: a local main nobody has
+ * pulled lately does not know what was merged.
+ */
+function resolveMainBranch(repoRoot) {
+  const git = (...args) => execCommand('git', ['-C', repoRoot, ...args]);
+  const head = git('symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD');
+  const names = head ? [head.replace(/^refs\/remotes\/origin\//, '')] : ['main', 'master'];
+  for (const name of names) {
+    const ref = [`refs/remotes/origin/${name}`, `refs/heads/${name}`]
+      .find(candidate => git('rev-parse', '--verify', '--quiet', candidate));
+    if (ref) return { name, ref };
+  }
+  return null;
+}
+
+/**
+ * The beads bd knows by exactly these ids, one `bd show` for all of them.
+ *
+ * A worktree's name is only a guess at its bead's id: in a project whose ids
+ * carry a prefix, bd-219 is not the id of anything. And `bd show` answers a
+ * partial id with whatever bead it matches, so a bead counts only when its id
+ * comes back unchanged.
+ */
+function confirmedBeads(guesses) {
+  const ids = guesses.filter(Boolean);
+  const beads = new Map();
+  if (ids.length === 0) return beads;
+
+  const found = execCommandJSON('bd', ['show', '--json', '--', ...ids]);
+  for (const bead of (Array.isArray(found) ? found : [])) {
+    if (bead && ids.includes(bead.id) && typeof bead.status === 'string') {
+      beads.set(bead.id, bead);
+    }
+  }
+  return beads;
+}
+
+function reportMergedWorktree(worktree, bead, output) {
+  const confirmed = worktree.verdict === 'merged';
+  output.push(confirmed
+    ? `ACTION REQUIRED: branch ${worktree.branch} was merged, but its worktree is still here.`
+    : `CHECK BY HAND: branch ${worktree.branch} looks merged, but git keeps no reflog for it to confirm that.`);
+  output.push(...beadLines(bead));
+  output.push(...(confirmed ? cleanupLines(worktree) : [`   Worktree: ${worktree.path}`]));
+  output.push('');
+}
+
+function beadLines(bead) {
+  if (!bead) {
+    return [
+      '   bd did not confirm which bead it belongs to — look the bead up and',
+      '   close it if it is still open.',
+    ];
+  }
+  if (bead.status === 'closed') return [];
+  return [`   Its bead ${bead.id} is still ${bead.status}: bd close "${bead.id}"`];
+}
+
+/**
+ * How to clean up, or why not to.
+ *
+ * Whatever the merge check above concluded, a removal command is printed only
+ * for a worktree read as clean — and without --force, so git's own check
+ * stays as a second net. A locked worktree refuses removal, and `&&` would
+ * then skip the prune. `bd worktree remove` is broken on Windows (u51); the
+ * rules allow git's own commands instead.
+ */
+function cleanupLines(worktree) {
+  if (worktree.locked) {
+    return [`   It is locked (git worktree lock), so it is left alone: ${worktree.path}`];
+  }
+  // .worktrees/ is ignored, so the one inside never shows in this one's status.
+  if (worktree.holdsWorktree) {
+    return [
+      '   Not suggesting removal: another worktree lives inside it and would go',
+      `   with it. Look at it by hand: ${worktree.path}`,
+    ];
+  }
+  if (!worktreeIsClean(worktree.path)) {
+    return [
+      '   Not suggesting removal: it holds uncommitted work, or its state could',
+      `   not be read. Look at it by hand: ${worktree.path}`,
+    ];
+  }
+  return [
+    `   Remove it: git worktree remove "${worktree.path}" && git worktree prune`,
+    '   (ignored files in it, such as .env, go with the directory)',
+  ];
+}
+
+/**
+ * True only when git read this worktree and found nothing uncommitted.
+ *
+ * Plain `git status --porcelain` is not enough: it obeys
+ * status.showUntrackedFiles=no and a submodule's ignore = all, and it never
+ * shows a change in a file marked skip-worktree or assume-unchanged — every
+ * one of those was deleted in a test. And a worktree that lost its .git file
+ * sends `git -C` up to the main checkout, which would be read instead.
+ */
+function worktreeIsClean(worktreePath) {
+  if (!isLinkedWorktreeRoot(worktreePath)) return false;
+
+  const status = execCommand('git', [
+    '-C', worktreePath, 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none',
+  ]);
+  // -v tags each file: H is an ordinary one; S is skip-worktree, lower case
+  // is assume-unchanged. One line per file, hence the larger buffer.
+  const index = execCommand('git', ['-C', worktreePath, 'ls-files', '-v'],
+                            { maxBuffer: 64 * 1024 * 1024 });
+  return status === '' && index !== null
+    && index.split(/\r?\n/).every(line => line === '' || line.startsWith('H '));
+}
+
+/** True when `git -C` answers from this linked worktree's root, not from above it. */
+function isLinkedWorktreeRoot(worktreePath) {
+  const answer = execCommand('git', [
+    '-C', worktreePath, 'rev-parse', '--path-format=absolute',
+    '--git-dir', '--show-prefix', '--git-common-dir',
+  ]);
+  // The prefix sits in the middle, so an empty one survives the trim.
+  const [gitDir, prefix, commonDir, ...rest] = (answer || '').split(/\r?\n/);
+  return Boolean(gitDir && commonDir) && prefix === '' && gitDir !== commonDir
+    && rest.length === 0;
 }
 
 /** Open pull requests are easy to forget between sessions. */
