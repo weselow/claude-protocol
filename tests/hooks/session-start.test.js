@@ -23,7 +23,7 @@ function project({ settings } = {}) {
   return dir;
 }
 
-/** A week is the update check's cache window; a fresh entry keeps it offline. */
+/** A day is the update check's cache window; a fresh entry keeps it offline. */
 function pluginDataSayingUpToDate() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-start-data-'));
   fs.writeFileSync(path.join(dir, 'claude-protocol-update-check.json'),
