@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterAll } from 'vitest';
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -17,9 +17,17 @@ const BEAD_ID = 'bd_1c-oko-219';
 const BRANCH = 'bd-219';
 const WORKTREE = `.worktrees/${BRANCH}`;
 
+// Every directory a test makes, removed when the file is done: each test
+// builds real repositories, and hundreds of them were once left behind.
+const made = [];
 function tmp(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  made.push(dir);
+  return dir;
 }
+afterAll(() => {
+  for (const dir of made) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+});
 
 /**
  * Git that knows nothing of the machine it runs on: no global or system
@@ -58,7 +66,9 @@ function project({ origin = true, pushed = true, beads = true } = {}) {
   fs.mkdirSync(dir);
   if (beads) fs.mkdirSync(path.join(dir, '.beads'));
   git(dir, 'init', '-q', '-b', 'main');
-  commitFile(dir, 'README.md', 'project\n');
+  commitFile(dir, '.gitignore', '.worktrees/\n');
+  fs.mkdirSync(path.join(dir, 'src'));
+  commitFile(dir, 'src/a.js', 'a\n');
   if (origin) {
     git(root, 'init', '-q', '--bare', 'origin.git');
     git(dir, 'remote', 'add', 'origin', path.join(root, 'origin.git'));
@@ -131,6 +141,16 @@ describe('validate-completion: when it stays out of the way', () => {
     expect(runHook(dir, { last_assistant_message: message })).toEqual(APPROVE);
   });
 
+  it.each([
+    ['a placeholder id', 'BEAD {BEAD_ID} COMPLETE'],
+    ['an id in angle brackets', 'BEAD <id> COMPLETE'],
+  ])('approves a message quoting the report template with %s', (_, marker) => {
+    const { dir } = shared();
+    const message = ['Subagents must end with:', '```', marker, 'Worktree: .worktrees/bd-{BEAD_ID}',
+      'Checklist:', '- [ ] requirement 1', '```'].join('\n');
+    expect(runHook(dir, { last_assistant_message: message })).toEqual(APPROVE);
+  });
+
   it('approves when the message is missing or empty', () => {
     const { dir } = shared();
     expect(runHook(dir, { last_assistant_message: undefined })).toEqual(APPROVE);
@@ -199,6 +219,64 @@ describe('validate-completion: the checklist', () => {
     const decision = runHook(dir, { last_assistant_message: report({ checklist: '' }) });
     expect(decision.decision).toBe('block');
     expect(decision.reason).toContain('no items');
+  });
+
+  it('reads past a bold sub-heading to a later open item', () => {
+    const { dir } = shared();
+    const checklist = '- [x] hooks\n**Docs**\n- [ ] README';
+    const decision = runHook(dir, { last_assistant_message: report({ checklist }) });
+    expect(decision.reason).toContain('1 unchecked');
+  });
+
+  it('reads past wrapped text to a later open item', () => {
+    const { dir } = shared();
+    const checklist = '- [x] a long requirement that\nwraps here: and goes on\n- [ ] b';
+    const decision = runHook(dir, { last_assistant_message: report({ checklist }) });
+    expect(decision.reason).toContain('1 unchecked');
+  });
+
+  it('accepts sub-headings around the items', () => {
+    const { dir } = shared();
+    const checklist = '**Hooks**\n- [x] a\n**Docs:**\n- [x] b';
+    expect(runHook(dir, { last_assistant_message: report({ checklist }) })).toEqual(APPROVE);
+  });
+
+  it('ends the checklist at a report label even with nothing after its colon', () => {
+    const { dir } = shared();
+    const message = [`BEAD ${BEAD_ID} COMPLETE`, `Worktree: ${WORKTREE}`, 'Checklist:', '- [x] a',
+      'Files:', '- work.txt', 'Found along the way:', '- [ ] follow-up'].join('\n');
+    expect(runHook(dir, { last_assistant_message: message })).toEqual(APPROVE);
+  });
+
+  it('ends the checklist at a closing code fence', () => {
+    const { dir } = shared();
+    const message = ['```', `BEAD ${BEAD_ID} COMPLETE`, `Worktree: ${WORKTREE}`, 'Checklist:',
+      '- [x] a', '```', '', '- [ ] an idea for later'].join('\n');
+    expect(runHook(dir, { last_assistant_message: message })).toEqual(APPROVE);
+  });
+
+  it('counts emoji ticks as ticked', () => {
+    const { dir } = shared();
+    const checklist = '- [✅] a\n- [✔️] b\n- [✔] c\n- ✅ d';
+    expect(runHook(dir, { last_assistant_message: report({ checklist }) })).toEqual(APPROVE);
+  });
+
+  it('does not let an emoji tick hide a later open item', () => {
+    const { dir } = shared();
+    const checklist = '- [x] a\n- [✔️] b\n- [ ] c';
+    const decision = runHook(dir, { last_assistant_message: report({ checklist }) });
+    expect(decision.reason).toContain('1 unchecked');
+  });
+
+  it.each([
+    ['inline code', (m) => m.replace(/^(BEAD .*)$/m, '`$1`')],
+    ['an emoji heading', (m) => `## ✅ ${m}`],
+    ['a blockquote', (m) => m.split('\n').map(line => `> ${line}`).join('\n')],
+  ])('reads a report whose marker is in %s', (_, dress) => {
+    const { dir } = shared();
+    const message = dress(report({ checklist: '- [ ] not done' }));
+    const decision = runHook(dir, { last_assistant_message: message });
+    expect(decision.reason).toContain('1 unchecked');
   });
 
   it('reads a report under a heading or in bold', () => {
@@ -299,6 +377,48 @@ describe('validate-completion: the worktree', () => {
     const bash = worktree.replace(/^([A-Za-z]):\\/, (_, d) => `/${d.toLowerCase()}/`)
       .replace(/\\/g, '/');
     expect(runHook(dir, { last_assistant_message: report({ worktree: bash }) })).toEqual(APPROVE);
+  });
+
+  it('takes the path at the start of the line, not a quoted one after it', () => {
+    const { dir, worktree } = project();
+    fs.writeFileSync(path.join(worktree, 'forgotten.txt'), 'not committed\n');
+    const decision = runHook(dir, {
+      last_assistant_message: report({ worktree: `${WORKTREE} (only touched \`src/\`)` }),
+    });
+    expect(decision.decision).toBe('block');
+    expect(decision.reason).toContain('forgotten.txt');
+  });
+
+  it('takes a path line with a quoted branch after it', () => {
+    const { dir } = shared();
+    const worktree = `${WORKTREE} — pushed to \`origin/${BRANCH}\``;
+    expect(runHook(dir, { last_assistant_message: report({ worktree }) })).toEqual(APPROVE);
+  });
+
+  it('finds the Worktree: line above the marker', () => {
+    const { dir } = shared();
+    const message = [`Worktree: ${WORKTREE}`, `BEAD ${BEAD_ID} COMPLETE`, 'Checklist:', '- [x] a'].join('\n');
+    expect(runHook(dir, { last_assistant_message: message })).toEqual(APPROVE);
+  });
+
+  it('takes a "Worktree path:" label', () => {
+    const { dir } = shared();
+    const message = report().replace('Worktree:', 'Worktree path:');
+    expect(runHook(dir, { last_assistant_message: message })).toEqual(APPROVE);
+  });
+
+  it.each([
+    ['a plain directory inside the main checkout', '.worktrees/bd-stale', 'not the top'],
+    ['a subdirectory of the main checkout', 'src', 'not the top'],
+    ['a subdirectory of the worktree', `${WORKTREE}/src`, 'not the top'],
+    ['the main checkout itself', '.', 'main checkout'],
+  ])('blocks %s', (_, worktree, why) => {
+    const { dir } = shared();
+    fs.mkdirSync(path.join(dir, '.worktrees', 'bd-stale'), { recursive: true });
+    const decision = runHook(dir, { last_assistant_message: report({ worktree }) });
+    expect(decision.decision).toBe('block');
+    expect(decision.reason).toContain(why);
+    expect(decision.reason).toContain(path.resolve(dir, worktree));
   });
 
   it('blocks a directory that is not a git worktree', () => {
