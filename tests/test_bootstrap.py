@@ -3379,6 +3379,110 @@ class TestPluginProvidedPaths:
 
 
 # ============================================================================
+# Every skill we ship, not only project-discovery
+# ============================================================================
+# The plugin loads every directory under templates/skills. The installer named
+# one of them, so a second skill would have reached plugin users and never an
+# npx install, and --project-only would have left its copy in the project. The
+# tests add a skill of their own to a copy of the templates instead of
+# shipping one.
+
+OTHER_SKILL = {
+    "skills/other-skill/SKILL.md": "---\nname: other-skill\n---\nA second skill\n",
+    "skills/other-skill/reference/notes.md": "a file one level down\n",
+}
+
+
+@pytest.fixture
+def two_skills(tmp_path, monkeypatch):
+    """Templates carrying a second skill, and an empty project to install into.
+
+    A loose file sits beside the skill directories too: the plugin loads
+    directories, so that file is not a skill and must not be installed as one.
+    """
+    templates = tmp_path / "templates"
+    shutil.copytree(TEMPLATES_DIR, templates)
+    for rel_key, text in OTHER_SKILL.items():
+        dest = templates / rel_key
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        write_verbatim(dest, text)
+    write_verbatim(templates / "skills" / "README.md", "not a skill\n")
+    monkeypatch.setattr(bootstrap, "TEMPLATES_DIR", templates)
+    # A plugin installed on this machine must not turn a plain run into
+    # --project-only.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
+    project = tmp_path / "project"
+    project.mkdir()
+    return project
+
+
+class TestEverySkillIsInstalled:
+    def test_a_plain_run_installs_every_skill(self, two_skills, monkeypatch):
+        assert _run_bootstrap(two_skills, monkeypatch) == 0
+
+        claude = two_skills / ".claude"
+        files = load_manifest(two_skills)["files"]
+        for rel_key, text in OTHER_SKILL.items():
+            assert (claude / rel_key).exists(), f"{rel_key} was not installed"
+            assert read_verbatim(claude / rel_key) == text
+            assert rel_key in files, f"{rel_key} is missing from the manifest"
+        assert (claude / SKILL_KEY).exists(), "project-discovery went missing"
+
+    def test_a_file_beside_the_skills_is_not_a_skill(self, two_skills, monkeypatch):
+        assert _run_bootstrap(two_skills, monkeypatch) == 0
+
+        assert not (two_skills / ".claude" / "skills" / "README.md").exists()
+
+    def test_an_edit_in_another_skill_is_a_question(self, two_skills, monkeypatch):
+        rel_key = "skills/other-skill/SKILL.md"
+        dest = two_skills / ".claude" / rel_key
+        dest.parent.mkdir(parents=True)
+        write_verbatim(dest, MINE)
+        write_verbatim(dest.parent / "our-notes.md", "notes I keep here\n")
+        manifest = {"files": {rel_key: "sha256:something-else"}}
+        asked = []
+        monkeypatch.setattr("builtins.input", lambda _: asked.append(1) or "k")
+
+        skipped = _copy_rules(two_skills, manifest,
+                              prompt=bootstrap.ConflictPrompt(interactive=True))
+
+        assert asked, "a file the user edited was replaced without asking"
+        assert rel_key in skipped
+        assert read_verbatim(dest) == MINE
+        assert read_verbatim(dest.parent / "our-notes.md") == "notes I keep here\n", \
+            "a file we never shipped was touched"
+
+
+class TestEverySkillIsHandedOver:
+    def test_the_plugin_provides_every_skill(self, two_skills):
+        rels = bootstrap.plugin_provided_relpaths()
+
+        for rel_key in [*OTHER_SKILL, SKILL_KEY]:
+            assert f".claude/{rel_key}" in rels, f"{rel_key} is not handed over"
+        assert ".claude/skills/README.md" not in rels
+
+    def test_project_only_takes_every_skill_away(self, two_skills, monkeypatch):
+        """The second skill is recorded by hand, as an earlier install that
+        carried it would have left it, so this fails on the cleanup alone."""
+        assert _run_bootstrap(two_skills, monkeypatch) == 0
+        manifest = load_manifest(two_skills)
+        for rel_key, text in OTHER_SKILL.items():
+            dest = two_skills / ".claude" / rel_key
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            write_verbatim(dest, text)
+            manifest["files"][rel_key] = file_sha256(dest)
+        save_manifest(two_skills, manifest)
+
+        assert _run_bootstrap(two_skills, monkeypatch, project_only=True) == 0
+
+        claude = two_skills / ".claude"
+        files = load_manifest(two_skills)["files"]
+        for rel_key in [*OTHER_SKILL, SKILL_KEY]:
+            assert not (claude / rel_key).exists(), f"{rel_key} was left behind"
+            assert rel_key not in files
+
+
+# ============================================================================
 # CLAUDE.md ships in both languages
 # ============================================================================
 # The rules already did; CLAUDE.md did not. A project installed with --lang ru
