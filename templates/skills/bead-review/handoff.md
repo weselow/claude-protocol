@@ -13,6 +13,7 @@ Author's checks:
 Known limits: <what is not done or not verified, and why; or "none">
 Points to cover: <optional: what to look at in particular>
 Post to: conversation (default) | PR | bead
+Language: <optional: the report's language, if not the one of this request>
 ```
 
 For a re-review, add:
