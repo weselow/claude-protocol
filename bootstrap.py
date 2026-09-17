@@ -1404,8 +1404,8 @@ def copy_rules_and_skills(with_rules: bool, lang: str,
 
     # Always copy beads workflow — it is the one rule that is not optional.
     # Use the translated file when the language has one; every translation keeps
-    # the completion-report strings verbatim (`BEAD {ID} COMPLETE`, `Checklist:`)
-    # because validate-completion.cjs matches on them.
+    # the completion-report strings verbatim (`BEAD {ID} COMPLETE`, `Worktree:`,
+    # `Checklist:`) because validate-completion.cjs matches on them.
     beads_src = rules_src_dir / "beads-workflow.md"
     if not beads_src.exists():
         beads_src = TEMPLATES_DIR / "rules" / "beads-workflow.md"

@@ -124,6 +124,13 @@ describe('validate-completion: when it stays out of the way', () => {
     expect(runHook(dir, { last_assistant_message: 'ok' })).toEqual(APPROVE);
   });
 
+  it('approves a message that only quotes the report marker', () => {
+    const { dir } = shared();
+    const message = `Review: the subagent said "BEAD ${BEAD_ID} COMPLETE" too early.\n` +
+      'Worktree: .worktrees/bd-999\nChecklist:\n- [ ] ask for a second pass';
+    expect(runHook(dir, { last_assistant_message: message })).toEqual(APPROVE);
+  });
+
   it('approves when the message is missing or empty', () => {
     const { dir } = shared();
     expect(runHook(dir, { last_assistant_message: undefined })).toEqual(APPROVE);
@@ -168,6 +175,39 @@ describe('validate-completion: the checklist', () => {
     const checklist = '- [x] first\n   - [ ] nested and open';
     const decision = runHook(dir, { last_assistant_message: report({ checklist }) });
     expect(decision.reason).toContain('1 unchecked');
+  });
+
+  it.each([
+    ['a star', '* [ ] open'],
+    ['a plus', '+ [ ] open'],
+    ['a number', '1. [x] done\n2. [ ] open'],
+  ])('counts an unchecked item marked with %s', (_, checklist) => {
+    const { dir } = shared();
+    const decision = runHook(dir, { last_assistant_message: report({ checklist }) });
+    expect(decision.decision).toBe('block');
+    expect(decision.reason).toContain('1 unchecked');
+  });
+
+  it('ignores an open item outside the Checklist', () => {
+    const { dir } = shared();
+    const message = `${report()}\nFound along the way:\n- [ ] something for later`;
+    expect(runHook(dir, { last_assistant_message: message })).toEqual(APPROVE);
+  });
+
+  it('blocks an empty Checklist', () => {
+    const { dir } = shared();
+    const decision = runHook(dir, { last_assistant_message: report({ checklist: '' }) });
+    expect(decision.decision).toBe('block');
+    expect(decision.reason).toContain('no items');
+  });
+
+  it('reads a report under a heading or in bold', () => {
+    const { dir } = shared();
+    const open = report({ checklist: '- [ ] not done' });
+    for (const prefix of ['## ', '**']) {
+      const decision = runHook(dir, { last_assistant_message: prefix + open });
+      expect(decision.decision).toBe('block');
+    }
   });
 
   it('checks the checklist before the worktree', () => {
@@ -232,6 +272,44 @@ describe('validate-completion: the worktree', () => {
     expect(decision).toEqual(APPROVE);
   });
 
+  it.each([
+    ['a note after the path', `${WORKTREE} (branch ${BRANCH})`],
+    ['a note after backticks', `\`${WORKTREE}\` — pushed`],
+    ['a full stop', `${WORKTREE}.`],
+    ['a markdown link', `[${WORKTREE}](${WORKTREE})`],
+  ])('takes the path from a line with %s', (_, worktree) => {
+    const { dir } = shared();
+    expect(runHook(dir, { last_assistant_message: report({ worktree }) })).toEqual(APPROVE);
+  });
+
+  it('takes the path from a label bold up to the colon', () => {
+    const { dir } = shared();
+    const message = report().replace('Worktree:', '**Worktree**:');
+    expect(runHook(dir, { last_assistant_message: message })).toEqual(APPROVE);
+  });
+
+  it('takes the path from the line after the label', () => {
+    const { dir } = shared();
+    const message = report().replace(`Worktree: ${WORKTREE}`, `Worktree:\n  ${WORKTREE}`);
+    expect(runHook(dir, { last_assistant_message: message })).toEqual(APPROVE);
+  });
+
+  it.runIf(process.platform === 'win32')('takes a Git Bash path on Windows', () => {
+    const { dir, worktree } = shared();
+    const bash = worktree.replace(/^([A-Za-z]):\\/, (_, d) => `/${d.toLowerCase()}/`)
+      .replace(/\\/g, '/');
+    expect(runHook(dir, { last_assistant_message: report({ worktree: bash }) })).toEqual(APPROVE);
+  });
+
+  it('blocks a directory that is not a git worktree', () => {
+    const { dir } = shared();
+    const plain = tmp('validate-completion-plain-');
+    const decision = runHook(dir, { last_assistant_message: report({ worktree: plain }) });
+    expect(decision.decision).toBe('block');
+    expect(decision.reason).toContain('not a git worktree');
+    expect(decision.reason).toContain(plain);
+  });
+
   it('blocks on uncommitted changes and names the file', () => {
     const { dir, worktree } = project();
     fs.writeFileSync(path.join(worktree, 'forgotten.txt'), 'not committed\n');
@@ -255,7 +333,27 @@ describe('validate-completion: the branch on origin', () => {
     commitFile(worktree, 'later.txt', 'after the push\n');
     const decision = runHook(dir);
     expect(decision.decision).toBe('block');
+    expect(decision.reason).toContain(`Branch ${BRANCH} on origin is at`);
     expect(decision.reason).toContain('git push');
+  });
+
+  it('blocks when origin has only a longer branch name ending in the same one', () => {
+    const { dir, worktree } = project({ pushed: false });
+    git(worktree, 'push', '-q', 'origin', `HEAD:refs/heads/foo/${BRANCH}`);
+    const decision = runHook(dir);
+    expect(decision.reason).toContain(`Branch ${BRANCH} is not on origin`);
+  });
+
+  it('is not misled by a longer branch name on origin at another commit', () => {
+    const { dir, worktree } = project();
+    git(worktree, 'push', '-q', 'origin', `main:refs/heads/foo/${BRANCH}`);
+    expect(runHook(dir)).toEqual(APPROVE);
+  });
+
+  it('approves a branch that shares its name with a tag', () => {
+    const { dir, worktree } = project();
+    git(worktree, 'tag', BRANCH);
+    expect(runHook(dir)).toEqual(APPROVE);
   });
 
   it('blocks a worktree on a detached HEAD', () => {
