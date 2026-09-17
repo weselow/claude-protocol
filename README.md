@@ -58,6 +58,13 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+- **`npx` installs every skill the plugin carries** — the installer named
+  `project-discovery` and nothing else, while the plugin loads every directory
+  under `templates/skills`. A second skill would have reached plugin users
+  only, and `--project-only` would have left its copy in the project. Both now
+  read the same list. An edited skill file is still a question, and a file of
+  your own inside a skill directory is still left alone.
+
 ### v3.9.2 (2026-09-07)
 
 - **A new version is announced within a day, not a week** — the update check
@@ -243,19 +250,19 @@ CLAUDE.md                   # Orchestrator instructions
 
 That is the `npx` install. As a plugin, only `rules/`, `.manifest.json`,
 `CLAUDE.md` and `.beads/` land in the project — the hooks, the agents and the
-skill stay in the plugin, which is what lets them update on their own.
+skills stay in the plugin, which is what lets them update on their own.
 
 ### Safe for existing projects — and for upgrades
 
 First install and re-install use the same command: `npx claude-protocol init`.
 
 - **Hooks** — always updated to the latest version (enforcement code). Only files we ship are replaced; a hook of your own is untouched.
-- **Rules, agents and the project-discovery skill** — updated only if you haven't modified them. A file you edited becomes a question; the version you don't pick is kept under `.claude/.upgrades/`. Files of your own inside the skill directory are never touched.
+- **Rules, agents and skills** — updated only if you haven't modified them. A file you edited becomes a question; the version you don't pick is kept under `.claude/.upgrades/`. Files of your own inside a skill directory are never touched.
 - **CLAUDE.md** — only the block between `<!-- claude-protocol:begin -->` and `<!-- claude-protocol:end -->` is ours, and only that block is refreshed. Your overview, tech stack and current state are never touched.
 - **settings.json** — hooks merged by event type. Your existing hooks stay.
 - **.gitignore** — missing entries appended. Nothing removed.
 
-Use `--force` to take our version of every file. Rules, agents, the skill and the CLAUDE.md block are copied to `.claude/.upgrades/<path>.mine` first, and an earlier copy is never overwritten, so every version you replace is still there. Hooks are replaced outright with no copy — they are enforcement code, replaced on every run anyway.
+Use `--force` to take our version of every file. Rules, agents, skills and the CLAUDE.md block are copied to `.claude/.upgrades/<path>.mine` first, and an earlier copy is never overwritten, so every version you replace is still there. Hooks are replaced outright with no copy — they are enforcement code, replaced on every run anyway.
 
 ### What happens at session start
 
@@ -366,7 +373,7 @@ source ends up supplying the hooks.
 | `--force` | Take our version of every file, no questions asked (yours is kept in `.claude/.upgrades/`) |
 | `--keep-mine` | Keep your version of every file you edited, no questions asked |
 | `--install-beads` | Install the beads CLI without asking (default: ask, and install nothing when nobody can answer) |
-| `--project-only` | Install only what a plugin cannot carry — beads, rules, CLAUDE.md — and hand hooks, agents and the skill over to the plugin. This is what `/claude-protocol:init` runs |
+| `--project-only` | Install only what a plugin cannot carry — beads, rules, CLAUDE.md — and hand hooks, agents and skills over to the plugin. This is what `/claude-protocol:init` runs |
 
 ### Local development (before npm publish)
 
@@ -523,7 +530,7 @@ A: Restart Claude Code. Hooks load from `settings.json` at startup.
 A: `beads-workflow.md` includes a full command reference table. If Claude still invents commands, it didn't read the rules — check that `.claude/rules/` exists.
 
 **Q: What happens if I run `init` again after updating claude-protocol?**
-A: Rules, agents and the skill you edited become a question, one file at a time, with a diff on request; the version you do not pick is kept under `.claude/.upgrades/`. Hooks are always updated. In CLAUDE.md only our marked block is refreshed — the rest of the file stays yours. `--force` and `--keep-mine` answer for everything up front.
+A: Rules, agents and skills you edited become a question, one file at a time, with a diff on request; the version you do not pick is kept under `.claude/.upgrades/`. Hooks are always updated. In CLAUDE.md only our marked block is refreshed — the rest of the file stays yours. `--force` and `--keep-mine` answer for everything up front.
 
 **Q: Can I use this without Dolt?**
 A: Yes. Beads works with SQLite by default. Dolt adds version history and branching for the task database.
