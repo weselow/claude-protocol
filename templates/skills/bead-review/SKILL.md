@@ -92,14 +92,17 @@ can and name the gap under "Not covered".
    PR, `baseRefOid`; for a branch, the default branch; for a range, the
    branch it starts with, or the one the request names. If that tip is
    `base`, the outlook is `up to date`. Otherwise check whether `head` still
-   merges into it: `git merge-tree --write-tree --name-only --no-messages
-   <tip> <head>` (Git 2.38 or later) exits with 1 on a conflict and prints the
-   conflicting paths after the first line; it changes no working tree, index
-   or branch. For a PR, `gh pr view <n> --json mergeable` answers too. With
-   no branch to check against, as for two bare SHAs, write `not checked` and
-   why. The result goes on the `Merge outlook` line of the report. A conflict
-   is not a finding and does not change the verdict, but resolving it makes a
-   new head, which needs a re-review.
+   merges into it with `git merge-tree --write-tree --name-only --no-messages
+   <tip> <head>` (Git 2.38 or later), which changes no working tree, index or
+   branch. A clean merge prints a tree id and exits with 0; a conflict exits
+   with 1 and lists the conflicting paths after the tree id. Anything else,
+   such as an error message with no tree id, means `not checked`, with the
+   message. With no branch to check against, as for two bare SHAs, write
+   `not checked` and why. The result goes on the `Merge outlook` line of the
+   report, followed by the branch and its tip, as in
+   `conflicts in README.md (main at 91a1eb7)`. A conflict is not a finding and
+   does not change the verdict, but resolving it makes a new head, which
+   needs a re-review.
 4. **Read the change whole, then what it touches**: `git log --oneline
    base..head`, `git diff --stat base..head`, `git diff base..head`. Open the
    callers, callees, tests and configuration the change relies on, as they are
@@ -159,8 +162,8 @@ Say what the answer would change.
 
 **Found along the way**: a defect that was already there at `base` and still
 is at `head`, in code the change calls, reuses or sits next to, which you met
-while checking the change. Do not go looking for these elsewhere. Show that it predates the
-change (`git blame <base> -- <path>`, or the code quoted from
+while checking the change. Do not go looking for these elsewhere. Show that
+it predates the change (`git blame <base> -- <path>`, or the code quoted from
 `git show <base>:<path>`), say how the change reaches it, and give it the
 priority it would have as a new defect: that is a suggestion for the bead
 that will track it. It does not count toward the verdict and is not the
@@ -176,9 +179,9 @@ defect. Do not pad the report: "no blocking findings" with an honest "Not
 covered" is a good result. Style and naming are suggestions unless a project
 rule makes them a defect.
 
-**Verdict**: `changes needed` while any P1 or P2 defect is open, and while a
-question is open whose answer could turn out to be a P1 or P2 (say which
-one). Otherwise `no blocking findings`.
+**Verdict**: `changes needed` while any P1 or P2 under Defects is open, and
+while a question is open whose answer could turn out to be a P1 or P2 (say
+which one). Otherwise `no blocking findings`.
 
 ## Report
 
@@ -189,7 +192,7 @@ Plain Markdown in this order. Leave out a section that would be empty, except
 ## Review of <bead-id>: <bead title>
 Head: <full head SHA> (<PR #n or branch name>)
 Base: <full base SHA>
-Merge outlook: <branch> at <short SHA>: clean | conflicts in <paths>
+Merge outlook: up to date | clean | conflicts in <paths> | not checked (<why>)
 Round: 1
 Verdict: changes needed | no blocking findings
 
@@ -255,8 +258,8 @@ Input: the previous report, or its findings, and the new head SHA.
    - `answered`, for a question: say whether the answer settles it. If the
      answer shows a defect, the finding keeps its id and moves to Defects
      with a priority.
-   - `moved to <bead-id>`: it now has a bead of its own, as a finding along
-     the way or one the user chose to defer; it is not repeated after this.
+   - `moved to <bead-id>`, for a finding along the way: it now has a bead of
+     its own and is not repeated after this.
 4. A problem that is still there keeps its old id; it is never filed again
    under a new one. New findings, and only those, continue the sequence: after
    R1 to R4 the next one is R5, even if R1 to R4 are all fixed.
@@ -267,7 +270,8 @@ Input: the previous report, or its findings, and the new head SHA.
    ### Previous findings
    R1 [P1] fixed: <evidence at the new head>
    R2 still open: <why>
-   R4 [P3] withdrawn: <why it was wrong>
+   R3 withdrawn: <why it was wrong>
+   R4 [P1] moved to proj-57: <the bead that now tracks it>
    ```
 
    Findings that are still open appear again in full, under their old ids, in
