@@ -1,54 +1,85 @@
 #!/usr/bin/env node
 'use strict';
 
-// SessionStart: Surface what the task tracker cannot see.
+// SessionStart: the beads left unfinished, and what the task tracker cannot
+// see.
 //
-// Deliberately NOT here: the list of in-progress / ready / blocked / stale
-// beads. `bd prime` already prints it at session start, and running four more
-// `bd` calls to print the same thing twice only slows the session down. What
-// stays is what bd has no way to know: the state of the working tree, merged
-// worktrees waiting to be cleaned up, and open pull requests.
+// The beads in progress, ready, blocked and stale are listed here, because
+// nothing else lists them: `bd prime` prints memories and a command reference
+// (bd 1.1.0), not the beads. The rest is what bd has no way to know: the state
+// of the working tree, merged worktrees waiting to be cleaned up, open pull
+// requests, an outdated bd, a newer claude-protocol.
 
 const fs = require('fs');
 const path = require('path');
 const {
-  injectText, execCommand, execCommandJSON, getProjectDir, runHook,
+  injectText, execCommand, execCommandJSON, execCommandJSONAsync, getProjectDir, runHook,
   parseBdVersion, versionBelow, BD_MIN_VERSION,
   hasBeads, isPluginInstall, readOwnVersion, updateNotice,
   leftoverProjectHooks,
 } = require('./hook-utils.cjs');
 
-runHook('session-start', () => {
-  const projectDir = getProjectDir();
+// Up here, not with the task-list functions: the hook body below starts
+// running at once, before any constant further down exists.
+//
+// A cold embedded dolt takes 5-20 s a call (reported from another project),
+// and execCommand's 10 s default dropped a list without a word. The output
+// grows with the beads, whole descriptions included, hence the larger buffer.
+const BD_LIST_OPTIONS = { timeout: 30000, maxBuffer: 64 * 1024 * 1024 };
+// The most beads a list is asked for; `bd blocked` takes no limit.
+const LIST_LIMIT = 50;
+// name and hint make the heading, `shown` is how many beads are printed, and
+// `note` adds what matters about a bead in that list.
+const TASK_LISTS = [
+  {
+    name: 'In Progress', hint: 'resume these', shown: 5,
+    args: ['list', '--status', 'in_progress'], limited: true,
+  },
+  { name: 'Ready', hint: 'no blockers', shown: 5, args: ['ready'], limited: true },
+  { name: 'Blocked', shown: 3, args: ['blocked'], note: blockedBy },
+  {
+    name: 'Stale', hint: 'no activity in 3 days', shown: 3,
+    args: ['stale', '--days', '3'], limited: true, note: staleStatus,
+  },
+];
 
-  if (!hasBeads()) {
-    // A copy installed under a project's .claude/hooks/ is there because
-    // someone put it there, so the missing directory is worth saying out loud.
-    // The plugin runs in every project it is enabled for, and telling each of
-    // them to run `bd init` every session is noise, not help.
-    if (!isPluginInstall()) {
-      injectText("No .beads directory found. Run 'bd init' to initialize.\n");
-    }
-    process.exit(0);
-  }
+runHook('session-start', async () => {
+  const projectDir = getProjectDir();
+  if (!hasBeads()) return reportNoBeads();
 
   const output = [];
   const repoRoot = execCommand('git', ['-C', projectDir, 'rev-parse', '--show-toplevel']);
 
   collectDoubleInstall(projectDir, output);
+  // Also teaches execCommand whether bd is a .cmd wrapper, so the list
+  // queries below go the right way on the first try.
   collectOutdatedBd(output);
+  // Asked now, printed last: bd works on the lists while the checks below run.
+  const taskLists = readTaskLists();
   collectUpdateNotice(output);
   collectDirtyWarning(repoRoot, output);
   collectMergedWorktrees(projectDir, repoRoot, output);
-  collectOpenPrs(output);
+  collectOpenPrs(repoRoot, output);
+  reportTaskLists(await taskLists, output);
 
-  if (output.length === 0) process.exit(0);
   injectText(output.join('\n') + '\n');
 });
 
 // ---------------------------------------------------------------------------
 // Sections
 // ---------------------------------------------------------------------------
+
+/**
+ * A copy installed under a project's .claude/hooks/ is there because someone
+ * put it there, so the missing directory is worth saying out loud. The plugin
+ * runs in every project it is enabled for, and telling each of them to run
+ * `bd init` every session is noise, not help.
+ */
+function reportNoBeads() {
+  if (!isPluginInstall()) {
+    injectText("No .beads directory found. Run 'bd init' to initialize.\n");
+  }
+}
 
 /**
  * A bd older than the rules rely on does not announce itself: it fails one
@@ -91,7 +122,7 @@ function collectDoubleInstall(projectDir, output) {
  * A newer claude-protocol than the one running here.
  *
  * The check lives in its own process with a hard time limit, and its answer is
- * cached for a week — a session start is not the place to wait on the network.
+ * cached for a day — a session start is not the place to wait on the network.
  * Nothing to say when the version cannot be read, when the check fails, or
  * when there is no network: an update people do not hear about costs less than
  * a slow start every time.
@@ -446,20 +477,19 @@ function isLinkedWorktreeRoot(worktreePath) {
     && rest.length === 0;
 }
 
-/** Open pull requests are easy to forget between sessions. */
-function collectOpenPrs(output) {
-  const openPrs = execCommand('gh', [
-    'pr', 'list', '--author', '@me', '--state', 'open',
+/**
+ * Open pull requests are easy to forget between sessions. Asked about origin
+ * by name, as the merged ones are (see mergedPullRequests): without it, gh in
+ * a fork with no default repository answers about the fork's parent.
+ */
+function collectOpenPrs(repoRoot, output) {
+  const repo = repoRoot && githubRepo(repoRoot);
+  if (!repo) return;
+
+  const prs = execCommandJSON('gh', [
+    'pr', 'list', '--repo', repo, '--author', '@me', '--state', 'open',
     '--json', 'number,title,headRefName',
   ]);
-  if (!openPrs || openPrs === '[]') return;
-
-  let prs;
-  try {
-    prs = JSON.parse(openPrs);
-  } catch {
-    return;
-  }
   if (!Array.isArray(prs) || prs.length === 0) return;
 
   output.push('You have open PRs:');
@@ -467,4 +497,90 @@ function collectOpenPrs(output) {
     output.push(`  #${pr.number} ${pr.title} (${pr.headRefName})`);
   }
   output.push('');
+}
+
+// ---------------------------------------------------------------------------
+// Task lists (the constants are at the top of the file)
+// ---------------------------------------------------------------------------
+
+/**
+ * The lists, all asked at once: warm, each call takes up to a few seconds,
+ * and one after another they added up. A list bd did not answer comes back
+ * with `beads: null`, which is not the same as an empty one.
+ */
+function readTaskLists() {
+  return Promise.all(TASK_LISTS.map(async (list) => {
+    const found = await execCommandJSONAsync('bd', listQuery(list), BD_LIST_OPTIONS);
+    const beads = Array.isArray(found)
+      ? found.filter(bead => bead && typeof bead.id === 'string')
+      : null;
+    return { ...list, beads };
+  }));
+}
+
+function listQuery(list) {
+  const limit = list.limited ? ['--limit', String(LIST_LIMIT)] : [];
+  return [...list.args, ...limit, '--json'];
+}
+
+/**
+ * The lists that have beads in them, then what the rest amounts to. Empty
+ * lists and lists bd did not answer look the same on the page unless someone
+ * says which is which, and silence from bd used to read as an empty board.
+ */
+function reportTaskLists(lists, output) {
+  output.push('## Task Status', '');
+  for (const list of lists) {
+    if (list.beads && list.beads.length > 0) output.push(...listLines(list), '');
+  }
+
+  const unanswered = lists.filter(list => !list.beads);
+  if (unanswered.length === lists.length) {
+    warnBdSilent(output);
+  } else if (unanswered.length > 0) {
+    const names = unanswered.map(list => list.name).join(', ');
+    const which = unanswered.length === 1 ? `the ${names} list` : `the ${names} lists`;
+    output.push(`WARNING: bd did not answer for ${which} — missing, not empty.`, '');
+  } else if (lists.every(list => list.beads.length === 0)) {
+    output.push('No beads in progress, ready, blocked or stale.');
+    output.push('   Create one with: bd create "Task title" -d "Description"', '');
+  }
+}
+
+function warnBdSilent(output) {
+  output.push('WARNING: bd answered none of the task-list queries, so the lists are');
+  output.push('   missing — which says nothing about whether there are beads. Check');
+  output.push('   that bd works here: bd list --status in_progress');
+  output.push('');
+}
+
+function listLines(list) {
+  const title = list.hint ? `${list.name} (${list.hint})` : list.name;
+  const shown = list.beads.slice(0, list.shown);
+  const lines = [`### ${title}:`, ...shown.map(bead => beadLine(bead, list.note))];
+  const rest = list.beads.length - shown.length;
+  if (rest > 0) {
+    // A list as long as the limit may well go on.
+    const more = list.limited && list.beads.length >= LIST_LIMIT ? `${rest}+` : `${rest}`;
+    lines.push(`  ... ${more} more: bd ${list.args.join(' ')}`);
+  }
+  return lines;
+}
+
+function beadLine(bead, note) {
+  const priority = Number.isInteger(bead.priority) ? ` [P${bead.priority}]` : '';
+  const title = String(bead.title || '').replace(/\s+/g, ' ').trim();
+  const extra = note ? note(bead) : '';
+  return `  ${bead.id}${priority} ${title}${extra ? ` — ${extra}` : ''}`;
+}
+
+function blockedBy(bead) {
+  const ids = Array.isArray(bead.blocked_by)
+    ? bead.blocked_by.filter(id => typeof id === 'string')
+    : [];
+  return ids.length > 0 ? `blocked by ${ids.join(', ')}` : '';
+}
+
+function staleStatus(bead) {
+  return typeof bead.status === 'string' ? bead.status : '';
 }

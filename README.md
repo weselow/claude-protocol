@@ -44,7 +44,7 @@ Claude Protocol fixes this with three things:
 
 - **Beads** — persistent task tracking. One task = one worktree = one PR. Survives restarts and compaction.
 - **Hooks** — enforcement, not instructions. Edits on main are blocked. Completion without checklist is blocked. `git --no-verify` is blocked.
-- **bd prime** — session start hook loads recent beads so state survives context loss.
+- **Session start** — a hook lists the beads in progress, ready, blocked and stale, so state survives context loss.
 
 Constraints over instructions. What's blocked can't be ignored.
 
@@ -106,6 +106,18 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
   longer assumes the diff is `main...bd-<id>`. Both install through `npx` and
   the plugin alike. An agent copy you never edited is replaced on upgrade; an
   edited one is a question, as before.
+- **Task lists are back at session start** — v3.6.0 dropped them from the
+  session-start hook on the belief that `bd prime` prints them. It does not:
+  `bd prime` prints memories and a command reference, so sessions started
+  with no picture of unfinished work. The hook again lists the beads in
+  progress, ready, blocked and stale — the first few of each, and how many
+  more. bd is asked all four at once, with 30 seconds per query, so a
+  database slow to wake is no longer cut off at 10. "No beads" and "bd did
+  not answer" now read differently: a list bd left unanswered is named, and
+  when it answered none the session gets a warning. The open pull request
+  reminder asks about origin by name (`gh pr list --repo`), as the
+  merged-worktree check does, so in a fork gh no longer answers about the
+  parent repository.
 
 ### v3.9.2 (2026-09-07)
 
@@ -309,11 +321,11 @@ Use `--force` to take our version of every file. Rules, agents, skills and the C
 
 ### What happens at session start
 
-The `session-start` hook says only what the task tracker cannot. `bd prime`
-already prints the beads — in progress, ready, blocked, stale — so repeating
-them here would cost a second listing and tell you nothing new.
+The `session-start` hook first reports what the task tracker cannot know,
+then lists the beads themselves — `bd prime` prints memories and a command
+reference, not the beads.
 
-What it does report:
+First, each only when there is something to say:
 
 - **ACTION REQUIRED** — a branch that was merged while its worktree and bead
   are still open, with the command to close both
@@ -325,7 +337,10 @@ What it does report:
 - **A newer claude-protocol** — checked at most once a day, in a process of
   its own with a time limit, and silent on any failure
 
-Nothing to report means nothing printed.
+**Task Status** comes last — the beads in progress, ready, blocked and stale
+(no activity in 3 days): the first few of each, and how many more. It is
+always printed: with no beads it says so, and when bd does not answer it says
+that instead, so an empty list and a silent bd never look alike.
 
 ### Project discovery
 
@@ -572,7 +587,7 @@ can follow it too.
 |------|-------|-------------|
 | bash-guard | PreToolUse (Bash) | Blocks `--no-verify` and raw `git worktree add`. Requires description on `bd create`. Validates epic close (all children done, PR merged). Every command in a chain is checked, not just the first. |
 | validate-completion | SubagentStop | Holds a completion report to the facts: checklist ticked, worktree committed, branch pushed. Blocks in every permission mode. |
-| session-start | SessionStart | Dirty main checkout, worktrees of merged branches, open PRs, a `bd` older than the rules need, a newer claude-protocol. Task listing is left to `bd prime`. |
+| session-start | SessionStart | Beads in progress, ready, blocked and stale; dirty main checkout, worktrees of merged branches, open PRs, a `bd` older than the rules need, a newer claude-protocol. |
 | update-check | — | Not a hook: the helper `session-start` spawns so the version check gets a time limit of its own. Answer cached for a day; silent on any failure. |
 | hook-utils | — | Shared utilities: project-dir resolution, command splitting, deny/ask/block, execCommand. |
 

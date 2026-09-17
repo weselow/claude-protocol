@@ -199,36 +199,57 @@ function pathWith(dir) {
 
 /**
  * Fake gh and bd.
- *   prs   — the merged pull requests gh knows for acme/widgets, or null for a
- *           gh that fails. Asked about any other repository — or about none,
- *           which is how gh without a default repository ends up answering
- *           about the fork's parent — it answers with an empty list.
- *   beads — what bd knows. Like the real one, `bd show` also answers a
- *           partial id with the bead whose id ends in it.
- * Every gh call is logged, so a test can tell what was asked.
+ *   prs     — the merged pull requests gh knows for acme/widgets, or null for
+ *             a gh that fails. Asked about any other repository — or about
+ *             none, which is how gh without a default repository ends up
+ *             answering about the fork's parent — it answers with an empty
+ *             list.
+ *   openPrs — the open pull requests gh knows for acme/widgets; the same
+ *             empty list for any other repository.
+ *   beads   — what bd knows. Like the real one, `bd show` also answers a
+ *             partial id with the bead whose id ends in it.
+ *   lists   — what bd answers for each task list, by name: in_progress,
+ *             ready, blocked, stale. An array is the answer; { after, beads }
+ *             is the same answer `after` milliseconds late; a list left out
+ *             fails, the way bd fails with no database to read.
+ * Every gh and bd call is logged, so a test can tell what was asked.
  */
-function fakeTools({ prs = null, beads = [] } = {}) {
+function fakeTools({ prs = null, openPrs = [], beads = [], lists = {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-start-bin-'));
-  const log = path.join(dir, 'gh-calls.log');
+  const logOf = (tool) => {
+    const log = path.join(dir, `${tool}-calls.log`);
+    return () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '');
+  };
   writeTool(dir, 'gh', `
 const args = process.argv.slice(2);
 fs.appendFileSync(path.join(__dirname, 'gh-calls.log'), args.join(' ') + '\\n');
 const value = (flag) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : null);
+const ours = value('--repo') === 'acme/widgets';
+if (args.includes('open')) { console.log(JSON.stringify(ours ? ${JSON.stringify(openPrs)} : [])); process.exit(0); }
 if (!args.includes('merged')) { console.log('[]'); process.exit(0); }
 const prs = ${JSON.stringify(prs)};
 if (prs === null) process.exit(1);
-console.log(JSON.stringify(value('--repo') === 'acme/widgets' ? prs : []));
+console.log(JSON.stringify(ours ? prs : []));
 `);
   writeTool(dir, 'bd', `
+fs.appendFileSync(path.join(__dirname, 'bd-calls.log'), process.argv.slice(2).join(' ') + '\\n');
 const [command, ...args] = process.argv.slice(2);
-const beads = ${JSON.stringify(beads)};
-const found = beads.filter(b => args.some(a => b.id === a || b.id.endsWith('-' + a)));
-if (command !== 'show' || found.length === 0) process.exit(1);
-console.log(JSON.stringify(found));
+if (command === 'show') {
+  const beads = ${JSON.stringify(beads)};
+  const found = beads.filter(b => args.some(a => b.id === a || b.id.endsWith('-' + a)));
+  if (found.length === 0) process.exit(1);
+  console.log(JSON.stringify(found));
+  process.exit(0);
+}
+const lists = ${JSON.stringify(lists)};
+const answer = lists[command === 'list' ? args[args.indexOf('--status') + 1] : command];
+if (!answer) process.exit(1);
+setTimeout(() => console.log(JSON.stringify(answer.beads || answer, null, 2)), answer.after || 0);
 `);
   return {
     env: { PATH: pathWith(dir) },
-    ghCalls: () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : ''),
+    ghCalls: logOf('gh'),
+    bdCalls: logOf('bd'),
   };
 }
 
@@ -544,5 +565,175 @@ describe('session-start on the bead behind a merged worktree', SLOW, () => {
     expect(out).toContain('branch bd-x was merged');
     expect(out).not.toContain('bd close');
     expect(out).not.toContain('look the bead up');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Open pull requests
+// ---------------------------------------------------------------------------
+
+describe('session-start on open pull requests', SLOW, () => {
+  const repoWithOrigin = (origin) => {
+    const dir = project();
+    git(dir, 'init', '-q');
+    git(dir, 'remote', 'add', 'origin', origin);
+    return dir;
+  };
+  const openPrs = [{ number: 12, title: 'Fix the thing', headRefName: 'bd-x' }];
+
+  // Without --repo, gh with no default repository answers about the fork's
+  // parent: an empty list, exit 0 — indistinguishable from "none open".
+  it('asks GitHub about the open pull requests of origin by name', () => {
+    const tools = fakeTools({ openPrs });
+    const out = runHook(repoWithOrigin(GITHUB), tools.env).stdout;
+
+    const asked = tools.ghCalls().split('\n').filter(call => call.includes('open'));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('--repo acme/widgets');
+    expect(out).toContain('#12 Fix the thing (bd-x)');
+  });
+
+  it('does not ask when origin is not on GitHub', () => {
+    const tools = fakeTools({ openPrs });
+    const out = runHook(repoWithOrigin('https://gitlab.com/acme/widgets.git'), tools.env).stdout;
+
+    expect(tools.ghCalls()).not.toContain('open');
+    expect(out).not.toContain('open PRs');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task lists
+// ---------------------------------------------------------------------------
+// `bd prime` prints memories and a command reference, not the beads: these
+// lists are the only picture of unfinished work a session starts with.
+
+/** A bead as `bd ... --json` prints it. */
+const bead = (id, fields = {}) => ({
+  id,
+  title: `Title of ${id}`,
+  description: `What ${id} is about.`,
+  status: 'open',
+  priority: 2,
+  issue_type: 'task',
+  owner: 'someone@example.com',
+  created_at: '2026-09-01T10:00:00Z',
+  created_by: 'someone',
+  updated_at: '2026-09-01T10:00:00Z',
+  ...fields,
+});
+
+const NO_BEADS = 'No beads in progress, ready, blocked or stale';
+
+describe('session-start on the task lists', SLOW, () => {
+  const run = (lists) => {
+    const tools = fakeTools({ lists });
+    return { out: runHook(project(), tools.env).stdout, tools };
+  };
+
+  it('prints the first few beads of each list, and how many more there are', () => {
+    const { out, tools } = run({
+      in_progress: [bead('app-w1', { status: 'in_progress', priority: 1 })],
+      ready: [1, 2, 3, 4, 5, 6, 7].map(n => bead(`app-r${n}`)),
+      blocked: [bead('app-b1', { status: 'blocked', blocked_by_count: 1, blocked_by: ['app-w1'] })],
+      stale: [bead('app-s1', { status: 'in_progress' })],
+    });
+
+    expect(out).toContain('## Task Status');
+    expect(out).toMatch(/In Progress[^\n]*\n {2}app-w1 \[P1\] Title of app-w1\n/);
+    expect(out).toContain('app-r5');
+    expect(out).not.toContain('app-r6');
+    expect(out).toContain('2 more: bd ready');
+    expect(out).toMatch(/app-b1 \[P2\] Title of app-b1 .*blocked by app-w1/);
+    expect(out).toMatch(/app-s1 \[P2\] Title of app-s1 .*in_progress/);
+    expect(out).not.toContain(NO_BEADS);
+    expect(out).not.toContain('WARNING');
+
+    const calls = tools.bdCalls();
+    expect(calls).toMatch(/^list --status in_progress .*--json$/m);
+    expect(calls).toMatch(/^ready .*--json$/m);
+    expect(calls).toMatch(/^blocked .*--json$/m);
+    expect(calls).toMatch(/^stale --days 3 .*--json$/m);
+  });
+
+  it('says there are no beads when bd answers every list with an empty one', () => {
+    const { out } = run({ in_progress: [], ready: [], blocked: [], stale: [] });
+
+    expect(out).toContain(NO_BEADS);
+    expect(out).not.toContain('WARNING');
+  });
+
+  // Silence from bd used to read exactly like an empty board.
+  it('says out loud that bd answered nothing, instead of reporting no beads', () => {
+    const { out } = run({});
+
+    expect(out).toContain('WARNING: bd answered none of the task-list queries');
+    expect(out).not.toContain(NO_BEADS);
+  });
+
+  it('prints the lists bd answered, and names the one it did not', () => {
+    const { out } = run({
+      in_progress: [bead('app-w1', { status: 'in_progress' })],
+      ready: [],
+      stale: [],
+    });
+
+    expect(out).toContain('app-w1');
+    expect(out).toContain('WARNING: bd did not answer for the Blocked list');
+    expect(out).not.toContain('answered none');
+    expect(out).not.toContain(NO_BEADS);
+  });
+
+  it('waits for a slow list while the others have answered', () => {
+    const { out } = run({
+      in_progress: [bead('app-w1', { status: 'in_progress' })],
+      ready: [bead('app-r1')],
+      blocked: { after: 3000, beads: [bead('app-b1', { blocked_by: ['app-w1'] })] },
+      stale: [],
+    });
+
+    expect(out).toContain('app-w1');
+    expect(out).toContain('app-r1');
+    expect(out).toContain('app-b1');
+    expect(out).not.toContain('WARNING');
+  });
+
+  // Warm, each call takes up to a few seconds; one after another they added up.
+  it('asks bd for all four lists at once', () => {
+    const late = (beads) => ({ after: 2500, beads });
+    const started = Date.now();
+    const { out } = run({
+      in_progress: late([bead('app-w1', { status: 'in_progress' })]),
+      ready: late([bead('app-r1')]),
+      blocked: late([]),
+      stale: late([]),
+    });
+
+    expect(out).toContain('app-w1');
+    expect(out).toContain('app-r1');
+    // One after another the fake alone would take 10 s.
+    expect(Date.now() - started).toBeLessThan(8000);
+  });
+});
+
+describe('session-start on a project without beads', () => {
+  const withoutBeads = () => {
+    const dir = project();
+    fs.rmSync(path.join(dir, '.beads'), { recursive: true });
+    return dir;
+  };
+
+  it('asks for bd init, and says nothing else', () => {
+    const result = runHook(withoutBeads());
+
+    expect(result.stdout).toBe("No .beads directory found. Run 'bd init' to initialize.\n");
+    expect(result.status).toBe(0);
+  });
+
+  it('keeps quiet as a plugin, which runs in projects that never chose beads', () => {
+    const result = runHook(withoutBeads(), { CLAUDE_PLUGIN_ROOT: path.join(os.tmpdir(), 'pretend-plugin') });
+
+    expect(result.stdout).toBe('');
+    expect(result.status).toBe(0);
   });
 });
