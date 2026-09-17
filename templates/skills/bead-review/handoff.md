@@ -29,5 +29,11 @@ Requests that start a review, shortest first:
 
 - `Review bead proj-42.`
 - `Review bead proj-42, PR #57.`
-- `Review proj-42 on main..bd-proj-42 at 3f2c1ab. npm test passes; the Windows path is not tested.`
-- `Re-review proj-42 at 9e81d04. Previous report above; R1 and R3 fixed, R2 disputed.`
+- `Review proj-42 on main...bd-proj-42 at 3f2c1ab. npm test passes.`
+- `Review proj-42, commits 1a2b3c4..3f2c1ab. Windows is not tested.`
+- `Re-review proj-42 at 9e81d04. R1, R3 fixed; R2 disputed.`
+
+A range that starts with a branch name is reviewed from the merge base,
+whether it is written with two dots or three; a range of two commit SHAs is
+taken as given. Commit before asking: the review reads commits, not a working
+tree.

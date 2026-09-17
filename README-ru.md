@@ -338,9 +338,10 @@ PATH этой оболочки — откройте новый терминал 
 ### Установка плагином
 
 То же самое, но через собственную систему плагинов Claude Code. Плагин несёт
-хуки, агентов и навыки (project-discovery и bead-review) и сам их обновляет. Чего плагин нести
-не умеет — это половина, которая обязана лежать в проекте: база beads,
-`.claude/rules/*.md` и блок в `CLAUDE.md`. Её раскладывает одна команда.
+хуки, агентов и навыки (project-discovery и bead-review) и сам их обновляет.
+Чего плагин нести не умеет — это половина, которая обязана лежать в проекте:
+база beads, `.claude/rules/*.md` и блок в `CLAUDE.md`. Её раскладывает одна
+команда.
 
 ```
 /plugin marketplace add weselow/claude-protocol
@@ -514,13 +515,19 @@ git checkout -b fix-typo     # обязательно не main
 
 ```
 Review bead proj-42, PR #57.
-Review proj-42 on main..bd-proj-42 at 3f2c1ab. npm test passes.
-Re-review proj-42 at 9e81d04. Previous report above; R1 and R3 fixed, R2 disputed.
+Review proj-42 on main...bd-proj-42 at 3f2c1ab. npm test passes.
+Review proj-42, commits 1a2b3c4..3f2c1ab.
+Re-review proj-42 at 9e81d04. Previous report above; R1, R3 fixed, R2 disputed.
 ```
 
 По-русски так же: «Проверь задачу proj-42, PR #57», «Проверь proj-42 на
-диапазоне main..bd-proj-42 до 3f2c1ab», «Перепроверь proj-42 на 9e81d04: R1 и
-R3 исправлены, с R2 не согласен».
+main...bd-proj-42 до 3f2c1ab», «Перепроверь proj-42 на 9e81d04: R1 и R3
+исправлены, с R2 не согласен».
+
+Если диапазон начинается с имени ветки (`main...bd-proj-42`, да и
+`main..bd-proj-42`), проверка идёт от общего предка веток: иначе всё, что
+`main` получил после начала работы, выглядело бы удалённым исполнителем.
+Диапазон из двух хешей коммитов берётся как есть.
 
 Руководитель или исполнитель, который просит о проверке, может заполнить
 форму из `handoff.md` навыка. Навык назван `bead-review`, а не

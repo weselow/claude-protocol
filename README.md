@@ -339,9 +339,9 @@ and an old `bd` fails those one at a time with no explanation.
 
 The same thing, installed through Claude Code's own plugin system. The plugin
 carries the hooks, the agents and the skills (project-discovery and
-bead-review), and updates them for you. What a plugin cannot carry is the half that has to live in the
-project — the beads database, `.claude/rules/*.md` and the block in
-`CLAUDE.md` — so one command lays that half down.
+bead-review), and updates them for you. What a plugin cannot carry is the half
+that has to live in the project — the beads database, `.claude/rules/*.md` and
+the block in `CLAUDE.md` — so one command lays that half down.
 
 ```
 /plugin marketplace add weselow/claude-protocol
@@ -514,9 +514,15 @@ Requests that work:
 
 ```
 Review bead proj-42, PR #57.
-Review proj-42 on main..bd-proj-42 at 3f2c1ab. npm test passes.
-Re-review proj-42 at 9e81d04. Previous report above; R1 and R3 fixed, R2 disputed.
+Review proj-42 on main...bd-proj-42 at 3f2c1ab. npm test passes.
+Review proj-42, commits 1a2b3c4..3f2c1ab.
+Re-review proj-42 at 9e81d04. Previous report above; R1, R3 fixed, R2 disputed.
 ```
+
+A range that starts with a branch name (`main...bd-proj-42`, and
+`main..bd-proj-42` too) is reviewed from the point where the branches split;
+otherwise everything `main` gained after the work began would look deleted by
+the implementer. A range of two commit SHAs is taken as given.
 
 A lead or an implementer asking for a review can fill in the form in the
 skill's `handoff.md`. The skill is called `bead-review`,

@@ -61,16 +61,25 @@ can and name the gap under "Not covered".
 3. **Pin the target.** Resolve both ends to full SHAs and write them down.
    - A branch: `git rev-parse <branch>`; the base is
      `git merge-base <default-branch> <branch>`.
-   - A PR: `gh pr view <n> --json number,title,headRefName,headRefOid,baseRefName,state`,
-     then `git fetch origin pull/<n>/head` (on GitHub this works for a PR
-     from a fork too, whose branch is not in `origin`) and check that
-     `git rev-parse FETCH_HEAD` equals `headRefOid`. The base is the merge base
-     with `origin/<baseRefName>`.
-   - A range `base..head`: `git rev-parse <base> <head>`.
+   - A PR: read `headRefOid`, `baseRefName` and `baseRefOid` with
+     `gh pr view <n> --json title,state,headRefOid,baseRefName,baseRefOid`,
+     then `git fetch origin <baseRefName> pull/<n>/head` (the pull ref works
+     for a PR from a fork too, whose branch is not in `origin`). Check that
+     both commits are now here (`git cat-file -e <sha>`); if the head is
+     missing, the PR moved on, so ask `gh` again. The head is `headRefOid`,
+     the base is `git merge-base <baseRefOid> <headRefOid>`.
+   - A range whose start is a branch or tag name, such as
+     `main...bd-proj-42` or `main..bd-proj-42`: the base is
+     `git merge-base <start> <end>`, whichever dots were written. A two-dot
+     diff between branch names also shows everything the start branch gained
+     after the work began, as if the implementer had deleted it.
+   - A range given as two commit SHAs: take both as given
+     (`git rev-parse <base> <head>`).
 
-   Everything below is about that head. Commits pushed later and uncommitted
-   changes in someone's working copy are not part of this review; say so if
-   you notice them.
+   From here on, `base` and `head` mean these two pinned SHAs. Everything
+   below is about that head. Commits pushed later and uncommitted changes in
+   someone's working copy are not part of this review; say so if you notice
+   them.
 4. **Read the change whole, then what it touches**: `git log --oneline
    base..head`, `git diff --stat base..head`, `git diff base..head`. Open the
    callers, callees, tests and configuration the change relies on, as they are
@@ -96,9 +105,11 @@ can and name the gap under "Not covered".
    checkout you are in usually belongs to someone who is working in it. Do not
    create a worktree or a branch of your own either; that is a change too, and
    in a beads project a plain `git worktree add` also leaves a shadow
-   `.beads/` copy. With no such tree, read the files with `git show`, put the
-   checks you could not run under "Not covered", and say which tree at which
-   head would let you run them.
+   `.beads/` copy. With no such tree, export the head into a new temporary
+   directory outside the repository (`git archive <head> | tar -x -C <dir>`),
+   run the checks there and delete the directory afterwards. The export has
+   no git history and no installed dependencies; install what the checks
+   need inside it, and put what still cannot run under "Not covered".
 7. **Write the findings** as described below, then read them once more
    against the code. Drop what you cannot back up, or turn it into a question.
 
@@ -240,12 +251,9 @@ Input: the previous report, or its findings, and the new head SHA.
   installed with `npx claude-protocol init`; `/claude-protocol:bead-review`
   with the plugin. `/code-review` is Claude Code's own PR review, a different
   skill; this one is named `bead-review` so that it does not replace it.
-- **Nothing that looks like a completion report.** The project's SubagentStop
-  hook (`validate-completion.cjs`) reads your final message as an implementer
-  finishing a task when one line has `BEAD <id> COMPLETE` and one line has
-  `Worktree:` or `Branch:` followed by `bd-...`. Depending on the version it
-  matches anywhere in a line, quotes and code spans included. It then checks
-  the checklist, the worktree, the push and the length of the message, and
-  stops you. The report form above has no such lines; when evidence would
-  quote one (from an implementer's report, a rule file or the hook's own
-  tests), describe it in words or cite `path:line` instead of quoting it.
+- **Never `BEAD` and `COMPLETE` on one line.** The project's completion hook
+  (`validate-completion.cjs`) reads such a line as an implementer's
+  completion report and checks the worktree against it, so a review that
+  carries one gets stopped. The report form above has none. When evidence
+  would quote such a line (from an implementer's report, a rule file or the
+  hook's tests), describe it in words or cite `path:line` instead.
