@@ -62,12 +62,14 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
   check asked git about a branch literally called `main`, could not see a
   squash-merged pull request, and missed every worktree branch anyway,
   because git lists those with a `+ ` in front. It never fired and never
-  said why. The main branch now comes from `origin/HEAD`, merged branches
-  from both `gh pr list --state merged` and `git branch --merged`, and when
-  neither answers the session is told. A branch nobody has committed on yet
-  is not taken for a merged one. The bead id is printed only when bd
-  confirms it, and the cleanup hint is `git worktree remove --force` plus
-  `git worktree prune`.
+  said why. The main branch now comes from `origin/HEAD` (origin's copy
+  first), merged branches from both GitHub — `gh pr list --state merged`
+  about origin, matched by the merged commit, not just the branch name —
+  and `git branch --merged`, and when neither answers the session is told.
+  A branch nobody has committed on yet, or whose commit was undone, is not
+  taken for a merged one. `git worktree remove --force` is suggested only
+  for a clean, unlocked worktree; anything else is left for a look by hand.
+  The bead id is printed only when bd confirms it.
 
 ### v3.9.2 (2026-09-07)
 
