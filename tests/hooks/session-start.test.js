@@ -143,13 +143,18 @@ function writeTool(dir, name, body) {
  * PATH with `dir` first and no real gh or bd behind it. First is enough on
  * Linux and macOS. On Windows Node looks for gh.exe in every PATH directory
  * before cmd.exe gets to look for gh.cmd, so a real gh.exe further down would
- * still answer; those directories are left out.
+ * still answer; those directories are left out. Where git shares one with
+ * them (a shims directory), the hook would find no git and every test below
+ * would fail on a misleading assertion, so that is said up front instead.
  */
 function pathWith(dir) {
-  const hasRealTool = (entry) => ['gh', 'bd'].some(tool =>
+  const has = (entry, tools) => tools.some(tool =>
     ['.exe', '.com', '.cmd', '.bat'].some(ext => fs.existsSync(path.join(entry, tool + ext))));
   const rest = (process.env.PATH || '').split(path.delimiter)
-    .filter(entry => entry && !(onWindows && hasRealTool(entry)));
+    .filter(entry => entry && !(onWindows && has(entry, ['gh', 'bd'])));
+  if (onWindows && !rest.some(entry => has(entry, ['git']))) {
+    throw new Error('git shares a PATH directory with gh or bd; these tests cannot hide one without the other');
+  }
   return [dir, ...rest].join(path.delimiter);
 }
 
