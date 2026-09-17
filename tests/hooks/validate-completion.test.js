@@ -203,6 +203,12 @@ describe('validate-completion: the worktree', () => {
     expect(decision).toEqual(APPROVE);
   });
 
+  it('takes the path from a bold label', () => {
+    const { dir } = shared();
+    const message = report().replace('Worktree:', '**Worktree:**');
+    expect(runHook(dir, { last_assistant_message: message })).toEqual(APPROVE);
+  });
+
   it('takes an absolute path in quotes', () => {
     const { dir, worktree } = shared();
     const decision = runHook(dir, { last_assistant_message: report({ worktree: `"${worktree}"` }) });
@@ -233,6 +239,14 @@ describe('validate-completion: the branch on origin', () => {
     const decision = runHook(dir);
     expect(decision.decision).toBe('block');
     expect(decision.reason).toContain('git push');
+  });
+
+  it('blocks a worktree on a detached HEAD', () => {
+    const { dir, worktree } = project();
+    git(worktree, 'checkout', '-q', '--detach');
+    const decision = runHook(dir);
+    expect(decision.decision).toBe('block');
+    expect(decision.reason).toContain('detached');
   });
 
   it('approves when origin cannot be reached', () => {
