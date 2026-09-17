@@ -23,11 +23,16 @@ Unless the request says otherwise:
   to, and then post the same text.
 - Change nothing: no edits, commits, pushes or rebases, no switching branches
   in someone's working copy. Running tests and reproductions is fine; leave
-  the tree as you found it.
-- Never merge a PR, close a bead or change its status. In the beads workflow
-  the implementer leaves the comment `AWAITING REVIEW` with the bead still
-  `in_progress`, and the user closes it after merging the PR. "No blocking
-  findings" means ready for the user's decision, nothing more.
+  the tree as you found it: `git status --short` prints the same before and
+  after. Caches that the test command writes and git ignores (`__pycache__`,
+  `.pytest_cache`, `node_modules/.vite`) do not count. Avoid them where the
+  tool allows (`python -B -m pytest -p no:cacheprovider` leaves none), and
+  never clean ignored files away: `git clean -X` would also take the author's
+  `.env` and installed dependencies.
+- Never merge a PR, create or close a bead, or change a bead's status. In the
+  beads workflow the implementer leaves the comment `AWAITING REVIEW` with the
+  bead still `in_progress`, and the user closes it after merging the PR. "No
+  blocking findings" means ready for the user's decision, nothing more.
 - Fixing the findings is separate work. If you are asked to fix them too,
   deliver the report first.
 
@@ -39,6 +44,7 @@ Unless the request says otherwise:
 | What to review | a PR (number or link); a repository and `base..head`; or the branch `bd-<id>` |
 | Author's checks | the hand-off or the bead comments: commands run and their results |
 | Known limits | the hand-off: what is not done or not verified, and why |
+| Points to cover | the request or the hand-off, if the requester named any: what to look at in particular |
 | For a re-review | the previous report (or its findings) and the new head SHA |
 
 Find what you can yourself: the bead, its comments, the PR, the branch, the
@@ -57,7 +63,8 @@ can and name the gap under "Not covered".
    decision by the user overrides the description. For an epic, read the
    children as well and review the result as a whole: the children fit
    together, the layers agree (storage, API, interface), and the design
-   document, if there is one, matches.
+   document, if there is one, matches. Points the requester asked you to
+   cover go on a list of their own; the report answers each one.
 3. **Pin the target.** Resolve both ends to full SHAs and write them down.
    - A branch: `git rev-parse <branch>`; the base is
      `git merge-base <default-branch> <branch>`.
@@ -80,6 +87,22 @@ can and name the gap under "Not covered".
    below is about that head. Commits pushed later and uncommitted changes in
    someone's working copy are not part of this review; say so if you notice
    them.
+
+   Then see where the branch the work will be merged into stands now: for a
+   PR, `baseRefOid`; for a branch, the default branch; for a range, the
+   branch it starts with, or the one the request names. If that tip is
+   `base`, the outlook is `up to date`. Otherwise check whether `head` still
+   merges into it with `git merge-tree --write-tree --name-only --no-messages
+   <tip> <head>` (Git 2.38 or later), which changes no working tree, index or
+   branch. A clean merge prints a tree id and exits with 0; a conflict exits
+   with 1 and lists the conflicting paths after the tree id. Anything else,
+   such as an error message with no tree id, means `not checked`, with the
+   message. With no branch to check against, as for two bare SHAs, write
+   `not checked` and why. The result goes on the `Merge outlook` line of the
+   report, followed by the branch and its tip, as in
+   `conflicts in README.md (main at 91a1eb7)`. A conflict is not a finding and
+   does not change the verdict, but resolving it makes a new head, which
+   needs a re-review.
 4. **Read the change whole, then what it touches**: `git log --oneline
    base..head`, `git diff --stat base..head`, `git diff base..head`. Open the
    callers, callees, tests and configuration the change relies on, as they are
@@ -137,15 +160,28 @@ Say what the answer would change.
 
 **Suggestion**: optional; the code is correct without it. It never blocks.
 
+**Found along the way**: a defect that was already there at `base` and still
+is at `head`, in code the change calls, reuses or sits next to, which you met
+while checking the change. Do not go looking for these elsewhere. Show that
+it predates the change (`git blame <base> -- <path>`, or the code quoted from
+`git show <base>:<path>`), say how the change reaches it, and give it the
+priority it would have as a new defect: that is a suggestion for the bead
+that will track it. It does not count toward the verdict and is not the
+implementer's to fix. It needs a bead of its own, which the lead or the user
+files; the reviewer does not. If the change makes the old defect worse or
+reachable in a new way, for example a new caller passes untrusted input to
+it, that part is a defect of this change. An old defect the task asked to fix
+is a criterion, not a finding along the way.
+
 Evidence is what you saw: quote the output a command printed, not the result
 you expect it to give. A suspicion you could not confirm is a question, not a
 defect. Do not pad the report: "no blocking findings" with an honest "Not
 covered" is a good result. Style and naming are suggestions unless a project
 rule makes them a defect.
 
-**Verdict**: `changes needed` while any P1 or P2 is open, and while a question
-is open whose answer could turn out to be a P1 or P2 (say which one).
-Otherwise `no blocking findings`.
+**Verdict**: `changes needed` while any P1 or P2 under Defects is open, and
+while a question is open whose answer could turn out to be a P1 or P2 (say
+which one). Otherwise `no blocking findings`.
 
 ## Report
 
@@ -156,6 +192,7 @@ Plain Markdown in this order. Leave out a section that would be empty, except
 ## Review of <bead-id>: <bead title>
 Head: <full head SHA> (<PR #n or branch name>)
 Base: <full base SHA>
+Merge outlook: up to date | clean | conflicts in <paths> | not checked (<why>)
 Round: 1
 Verdict: changes needed | no blocking findings
 
@@ -175,9 +212,18 @@ R2 <the question>
 ### Suggestions (optional)
 R3 <the suggestion> (<path>:<line>)
 
+### Found along the way (not introduced by this change)
+R4 [P1] <one line: what is wrong>
+- Where: <path>:<line>, already there at base
+- How the change reaches it: <the call or reuse that led you there>
+- Evidence: <code quoted at base, or the command and its output>
+
 ### Acceptance criteria
 1. <criterion>: met (<evidence>)
 2. <criterion>: not met, see R1
+
+### Requested points
+- <the point as asked>: <answer> (criterion <n>, R<n> or a check run)
 
 ### Checks run
 - `<command>` in <tree> at <short head SHA>: <result>
@@ -188,7 +234,9 @@ R3 <the suggestion> (<path>:<line>)
 
 Mark criteria with the words met, not met or not verified rather than
 checkboxes, and keep lines out of the report that read like an implementer's
-completion report (the Claude Code section says why).
+completion report (the Claude Code section says why). A requested point you
+could not settle is answered `not verified`, with the reason under "Not
+covered".
 
 ## Re-review
 
@@ -210,6 +258,8 @@ Input: the previous report, or its findings, and the new head SHA.
    - `answered`, for a question: say whether the answer settles it. If the
      answer shows a defect, the finding keeps its id and moves to Defects
      with a priority.
+   - `moved to <bead-id>`, for a finding along the way: it now has a bead of
+     its own and is not repeated after this.
 4. A problem that is still there keeps its old id; it is never filed again
    under a new one. New findings, and only those, continue the sequence: after
    R1 to R4 the next one is R5, even if R1 to R4 are all fixed.
@@ -220,12 +270,12 @@ Input: the previous report, or its findings, and the new head SHA.
    ### Previous findings
    R1 [P1] fixed: <evidence at the new head>
    R2 still open: <why>
-   R4 [P3] withdrawn: <why it was wrong>
+   R3 withdrawn: <why it was wrong>
+   R4 [P1] moved to proj-57: <the bead that now tracks it>
    ```
 
    Findings that are still open appear again in full, under their old ids, in
-   the Defects, Questions or Suggestions section, so the report stands on its
-   own.
+   their own section, so the report stands on its own.
 
 ## Delivering the report
 

@@ -100,7 +100,10 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 - **A review skill, and `code-reviewer` built on it** — `bead-review` checks a
   bead's branch, PR or commit range against the task and its acceptance
   criteria, and reports findings R1, R2… pinned to the head SHA, keeping their
-  numbers on a re-review. `code-reviewer` now preloads the skill instead of
+  numbers on a re-review. The report also says whether the work still merges
+  into the branch it goes to, answers the points the request asked to cover,
+  and lists old defects the change only runs into separately, for a bead of
+  their own. `code-reviewer` now preloads the skill instead of
   carrying a procedure of its own: it no longer demands DEMO blocks that no
   rule asked implementers to write, no longer pins `model: haiku`, and no
   longer assumes the diff is `main...bd-<id>`. Both install through `npx` and
