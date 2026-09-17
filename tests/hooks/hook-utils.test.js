@@ -966,19 +966,35 @@ describe('execCommandAsync', () => {
     expect(await json('not json')).toBeNull();
   });
 
-  // The same wrapper handling as execCommand: bd and gh installed through npm
-  // are .cmd files, which cannot be spawned directly.
-  (onWindows ? it : it.skip)('runs a .cmd wrapper and keeps its arguments intact', async () => {
+  /** A .cmd wrapper `name` on PATH that forwards its arguments to an argv printer. */
+  function asyncWrapper(name) {
     const dir = asyncTempDir('hu-async-wrapper-');
     const printer = path.join(dir, 'argv-print.js');
     fs.writeFileSync(printer, 'process.argv.slice(2).forEach((a, i) => console.log(i + "=<" + a + ">"));\n');
-    fs.writeFileSync(path.join(dir, 'cp-async-printer.cmd'),
+    fs.writeFileSync(path.join(dir, `${name}.cmd`),
       `@echo off\r\n"${process.execPath}" "${printer}" %*\r\n`);
-    const env = { ...process.env, PATH: dir + path.delimiter + process.env.PATH };
+    return { env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH } };
+  }
 
-    const out = await execCommandAsync('cp-async-printer', ['two words', 'a^b', 'x&&echo PWNED'], { env });
+  // The same wrapper handling as execCommand: bd and gh installed through npm
+  // are .cmd files, which cannot be spawned directly.
+  (onWindows ? it : it.skip)('runs a .cmd wrapper and keeps its arguments intact', async () => {
+    const out = await execCommandAsync(
+      'cp-async-printer', ['two words', 'a^b', 'x&&echo PWNED'], asyncWrapper('cp-async-printer'));
 
     expect(lines(out)).toEqual(['0=<two words>', '1=<a^b>', '2=<x&&echo PWNED>']);
+  });
+
+  // The first call learns that the name is a wrapper; the second goes to
+  // cmd.exe straight away.
+  (onWindows ? it : it.skip)('goes straight to cmd.exe for a wrapper it already knows', async () => {
+    const opts = asyncWrapper('cp-async-twice');
+
+    const first = await execCommandAsync('cp-async-twice', ['one', 'a^b'], opts);
+    const second = await execCommandAsync('cp-async-twice', ['two words', 'x&&echo PWNED'], opts);
+
+    expect(lines(first)).toEqual(['0=<one>', '1=<a^b>']);
+    expect(lines(second)).toEqual(['0=<two words>', '1=<x&&echo PWNED>']);
   });
 
   // Behind a wrapper (a .cmd, or npm's bd launcher) the program runs as a
@@ -988,7 +1004,11 @@ describe('execCommandAsync', () => {
     const dir = asyncTempDir('hu-async-slow-');
     const sleeper = path.join(dir, 'sleep.js');
     fs.writeFileSync(sleeper, 'setTimeout(() => {}, 8000);\n');
-    let call = [process.execPath, [sleeper]];
+    // What npm's bd launcher does: start the real program as its own child.
+    const launcher = path.join(dir, 'launch.js');
+    fs.writeFileSync(launcher, `require('child_process').spawn(process.execPath, `
+      + `[${JSON.stringify(sleeper)}], { stdio: 'inherit' });`);
+    let call = [process.execPath, [launcher]];
     if (onWindows) {
       fs.writeFileSync(path.join(dir, 'cp-sleeper.cmd'), `@"${process.execPath}" "${sleeper}"\r\n`);
       call = ['cp-sleeper', []];
@@ -1006,6 +1026,21 @@ describe('execCommandAsync', () => {
 
     expect(result.stdout).toBe('null');
     expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  // execFile reports a program stopped at its time limit as a success with no
+  // output when the program had in fact finished, but this process was too
+  // busy to read its answer before the limit. An empty answer is not "no
+  // answer".
+  it('gives null, not an empty answer, when the answer is read only after the time limit', () => {
+    const script = `const u = require(${JSON.stringify(utilsPath)});`
+      + `u.execCommandAsync(process.execPath, ['-e', 'console.log("[1]")'], { timeout: 500 })`
+      + '.then(out => process.stdout.write(JSON.stringify(out)));'
+      + 'const busyUntil = Date.now() + 2000; while (Date.now() < busyUntil) {}';
+
+    const result = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 20000 });
+
+    expect(result.stdout).toBe('null');
   });
 });
 

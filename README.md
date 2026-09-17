@@ -311,16 +311,11 @@ Use `--force` to take our version of every file. Rules, agents, skills and the C
 
 ### What happens at session start
 
-The `session-start` hook starts with the beads — `bd prime` prints memories
-and a command reference, not the beads themselves — and adds what the task
-tracker cannot know.
+The `session-start` hook first reports what the task tracker cannot know,
+then lists the beads themselves — `bd prime` prints memories and a command
+reference, not the beads.
 
-**Task Status** — the beads in progress, ready, blocked and stale (no activity
-in 3 days): the first few of each, and how many more. Always printed: with no
-beads it says so, and when bd does not answer it says that instead, so an
-empty list and a silent bd never look alike.
-
-What else it reports:
+First, each only when there is something to say:
 
 - **ACTION REQUIRED** — a branch that was merged while its worktree and bead
   are still open, with the command to close both
@@ -332,7 +327,10 @@ What else it reports:
 - **A newer claude-protocol** — checked at most once a day, in a process of
   its own with a time limit, and silent on any failure
 
-Apart from the task status, nothing to report means nothing printed.
+**Task Status** comes last — the beads in progress, ready, blocked and stale
+(no activity in 3 days): the first few of each, and how many more. It is
+always printed: with no beads it says so, and when bd does not answer it says
+that instead, so an empty list and a silent bd never look alike.
 
 ### Project discovery
 

@@ -287,24 +287,32 @@ async function execCommandJSONAsync(cmd, args, opts) {
  * Start a program and resolve with { error, stdout } once it is done or its
  * time is up.
  *
- * At the time limit execFile closes the output pipes before it stops the
- * program, so a program that runs on as a grandchild — behind a .cmd wrapper,
- * or behind npm's bd launcher, which starts the real bd as its own child —
- * neither delays the answer nor keeps this process alive (measured on Windows
- * and Linux).
+ * The time limit is kept here, not left to execFile. When this process is too
+ * busy to read an answer before the limit, execFile stops a program that has
+ * already finished and reports success with empty output — an answer lost
+ * would read as an empty one. Here the limit always ends in an error.
  */
 function settle(file, args, options) {
   return new Promise((resolve) => {
+    let timer = null;
     const finish = (error, stdout) => {
+      clearTimeout(timer);
       resolve({ error, stdout: error ? null : String(stdout).trim() });
     };
     let child;
     try {
-      child = execFile(file, args, options, finish);
+      child = execFile(file, args, { ...options, timeout: 0 }, finish);
     } catch (err) {
       // A .cmd started directly is refused on the spot (EINVAL), not later.
       finish(err);
       return;
+    }
+    // 0 is no limit, as it is for execFileSync.
+    if (options.timeout > 0) {
+      timer = setTimeout(() => {
+        stopChild(child);
+        finish(new Error(`${file}: no answer within ${options.timeout} ms`));
+      }, options.timeout);
     }
     // Nothing is ever written to it; closing it at once is what execFileSync
     // does too. A program that is already gone can make that close fail with
@@ -312,6 +320,18 @@ function settle(file, args, options) {
     child.stdin.on('error', () => {});
     child.stdin.end();
   });
+}
+
+/**
+ * What execFile does at its own time limit: close the output pipes, then stop
+ * the program. Closing them first matters — a program that runs on as a
+ * grandchild (behind a .cmd wrapper, or behind npm's bd launcher) keeps them
+ * open, and would otherwise keep this process alive.
+ */
+function stopChild(child) {
+  child.stdout.destroy();
+  child.stderr.destroy();
+  child.kill();
 }
 
 // ---------------------------------------------------------------------------
