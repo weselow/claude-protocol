@@ -1,0 +1,33 @@
+# Review hand-off
+
+What an implementer or a lead gives the reviewer. Fill in what applies; the
+reviewer finds the rest (the bead text, the PR, the merge base) without help.
+
+```text
+Review request
+Bead: <bead id>   (no bd access: paste the task text and acceptance criteria)
+Target: PR <number or link> | <repository> <base>..<head> | branch bd-<id>
+Head: <full SHA the review is for>
+Author's checks:
+- `<command>`: <result>
+Known limits: <what is not done or not verified, and why; or "none">
+Post to: conversation (default) | PR | bead
+```
+
+For a re-review, add:
+
+```text
+Round: <n>
+Previous report: <link, or its findings pasted>
+Author's answers:
+- R1 fixed in <short SHA>
+- R2 disputed: <reason>
+- R3 answered: <answer>
+```
+
+Requests that start a review, shortest first:
+
+- `Review bead proj-42.`
+- `Review bead proj-42, PR #57.`
+- `Review proj-42 on main..bd-proj-42 at 3f2c1ab. npm test passes; the Windows path is not tested.`
+- `Re-review proj-42 at 9e81d04. Previous report above; R1 and R3 fixed, R2 disputed.`
