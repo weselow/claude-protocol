@@ -58,6 +58,16 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+- **The completion check stops a subagent for real** — `validate-completion`
+  never once blocked anyone: in `bypassPermissions` mode its block became a
+  warning the model never sees, and most of its alarms were false because it
+  built the worktree path from the bead id. It now reads the report Claude
+  Code hands over, takes the worktree from the report's `Worktree:` line, and
+  sends the subagent back in every permission mode when a checklist item is
+  unticked, the worktree has uncommitted changes, or the branch is not on
+  origin at the worktree's commit. An origin that cannot be reached does not
+  block. The comment, status and length checks are gone.
+
 ### v3.9.2 (2026-09-07)
 
 - **A new version is announced within a day, not a week** — the update check
@@ -467,19 +477,20 @@ git checkout -b fix-typo     # must be off main
 
 ### Completion verification
 
-Subagents are blocked from finishing unless:
+A subagent that ends with a completion report (`BEAD {ID} COMPLETE`) is sent
+back to work, in every permission mode, unless:
 - `Checklist:` section present with all `[x]` items checked
-- Bead status set to `inreview`
-- Code committed and pushed
-- Comment left on bead
-- Response within verbosity limits (25 lines / 1200 chars)
+- the `Worktree:` line names an existing directory
+- that worktree has nothing uncommitted
+- its branch is on origin at the worktree's commit (skipped when there is no
+  origin or it cannot be reached)
 
 ## Hooks
 
 | Hook | Event | Enforcement |
 |------|-------|-------------|
 | bash-guard | PreToolUse (Bash) | Blocks `--no-verify` and raw `git worktree add`. Requires description on `bd create`. Validates epic close (all children done, PR merged). Every command in a chain is checked, not just the first. |
-| validate-completion | SubagentStop | Checks worktree, push, status, checklist, comment, verbosity. |
+| validate-completion | SubagentStop | Holds a completion report to the facts: checklist ticked, worktree committed, branch pushed. Blocks in every permission mode. |
 | session-start | SessionStart | Dirty main checkout, worktrees of merged branches, open PRs, a `bd` older than the rules need, a newer claude-protocol. Task listing is left to `bd prime`. |
 | update-check | — | Not a hook: the helper `session-start` spawns so the version check gets a time limit of its own. Answer cached for a day; silent on any failure. |
 | hook-utils | — | Shared utilities: project-dir resolution, command splitting, deny/ask/block, execCommand. |

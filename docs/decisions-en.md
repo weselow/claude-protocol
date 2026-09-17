@@ -117,14 +117,12 @@ Every decision made during the v2 → v3 rewrite. Context, alternatives, rationa
 
 **Decision:**
 - `open` → created
-- `in_progress` → work started
-- `inreview` → submitted for review (enforced by validate-completion hook)
-- `done` → closed
+- `in_progress` → work started; stays so after submission, which an `AWAITING REVIEW` comment marks
+- `done` → closed by the user after the merge
 
 **Enforcement:**
-- `inreview` on completion — hook blocks subagent if not set
-- `in_progress` on start — instruction only (no enforcement, bd doesn't store status history)
-- Close after merge — `session-start.cjs` shows ACTION REQUIRED for merged worktrees and beads in `inreview`
+- Status — instruction only (bd doesn't store status history, and the completion hook does not read the status)
+- Close after merge — `session-start.cjs` shows ACTION REQUIRED for merged worktrees whose bead is still open
 
 ### 3.5 Checklist verification on completion
 
@@ -132,7 +130,7 @@ Every decision made during the v2 → v3 rewrite. Context, alternatives, rationa
 1. Re-read `bd show {ID}` — compare description with results
 2. Include `Checklist:` section in completion report with `[x]` marks
 
-**Enforcement:** Hook `validate-completion.cjs` blocks if no `Checklist:` or unchecked `[ ]` items.
+**Enforcement:** Hook `validate-completion.cjs` (SubagentStop) reads the subagent's last message. If it is a completion report (`BEAD {ID} COMPLETE`), the subagent is sent back — in every permission mode, `bypassPermissions` included — when `Checklist:` is missing or has an unchecked `[ ]` item, when the `Worktree:` line names no existing directory, when that worktree has uncommitted changes, or when its branch is not on origin at the worktree's commit. No origin, or one that cannot be reached, skips the last check. A second stop (`stop_hook_active`) is let through, so the hook never argues in a loop.
 
 **Why:** Without this, Claude often says "done" having completed 3 of 5 items. Especially after compaction.
 
