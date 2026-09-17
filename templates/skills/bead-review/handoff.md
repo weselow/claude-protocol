@@ -11,6 +11,7 @@ Head: <full SHA the review is for>
 Author's checks:
 - `<command>`: <result>
 Known limits: <what is not done or not verified, and why; or "none">
+Points to cover: <optional: what to look at in particular>
 Post to: conversation (default) | PR | bead
 ```
 
@@ -31,9 +32,10 @@ Requests that start a review, shortest first:
 - `Review bead proj-42, PR #57.`
 - `Review proj-42 on main...bd-proj-42 at 3f2c1ab. npm test passes.`
 - `Review proj-42, commits 1a2b3c4..3f2c1ab. Windows is not tested.`
+- `Review bead proj-42, PR #57. Check the retry path in particular.`
 - `Re-review proj-42 at 9e81d04. R1, R3 fixed; R2 disputed.`
 
 A range that starts with a branch name is reviewed from the merge base,
 whether it is written with two dots or three; a range of two commit SHAs is
-taken as given. Commit before asking: the review reads commits, not a working
-tree.
+taken as given; to learn whether it still merges, name the branch it goes
+into. Commit before asking: the review reads commits, not a working tree.
