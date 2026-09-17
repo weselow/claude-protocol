@@ -134,10 +134,11 @@ function collectMergedWorktrees(projectDir, repoRoot, output) {
   const worktrees = listBeadWorktrees(repoRoot);
   if (worktrees.length === 0) return;
 
-  const branches = worktrees.map(worktree => worktree.branch);
+  // Both sources measure against the main branch; without one, neither can.
+  const main = resolveMainBranch(repoRoot);
   const sources = {
-    github: mergedPullRequests(repoRoot, branches),
-    git: branchesMergedInGit(repoRoot, branches),
+    github: main && mergedPullRequests(repoRoot, main.name),
+    git: main && branchesMergedInGit(repoRoot, main.ref, worktrees.map(w => w.branch)),
   };
   if (!sources.github && !sources.git) return warnNobodyAnswered(output);
 
@@ -201,16 +202,24 @@ function parseWorktreeEntry(entry) {
  * for a branch someone has committed on.
  */
 function mergeVerdict(repoRoot, worktree, sources) {
-  const byGit = Boolean(sources.git && sources.git.has(worktree.branch));
-  const byGitHub = (sources.github || []).some(pr => pr.headRefName === worktree.branch
-    && pullRequestContains(repoRoot, pr.headRefOid, worktree.head));
-  if (!byGit && !byGitHub) return null;
+  const claims = mergeClaims(repoRoot, worktree, sources);
+  if (!claims.git && !claims.github) return null;
 
   const history = branchHistory(repoRoot, worktree);
   if (!history) return 'unconfirmed';
-  if (byGit && history.tipCommitted) return 'merged';
-  if (byGitHub && history.everCommitted) return 'merged';
-  return null;
+  const confirmed = (claims.git && history.tipCommitted)
+    || (claims.github && history.everCommitted);
+  return confirmed ? 'merged' : null;
+}
+
+/** Which sources say this worktree's branch was merged. */
+function mergeClaims(repoRoot, worktree, sources) {
+  const pullRequests = sources.github || [];
+  return {
+    git: Boolean(sources.git && sources.git.has(worktree.branch)),
+    github: pullRequests.some(pr => pr.headRefName === worktree.branch
+      && pullRequestContains(repoRoot, pr.headRefOid, worktree.head)),
+  };
 }
 
 /** True when a merged pull request's head is this tip or comes after it. */
@@ -244,50 +253,48 @@ function branchHistory(repoRoot, worktree) {
 }
 
 /**
- * Merged pull requests of origin, or null when GitHub could not be asked.
+ * Pull requests of origin merged into `mainName`, or null when GitHub could
+ * not be asked.
  *
  * Always about origin by name: without a default repository set, gh picks the
  * fork's parent on its own and answers with an empty list, which looks
- * exactly like "nothing merged". With a few worktrees each branch is asked
- * about by name, which finds a merge however old; with many, one list of the
- * latest merges has to do.
+ * exactly like "nothing merged". One question for all worktrees — asking per
+ * branch took seconds each — so only the latest 200 merges are seen; a
+ * squash merge older than that goes unreported.
  */
-function mergedPullRequests(repoRoot, branches) {
+function mergedPullRequests(repoRoot, mainName) {
   const repo = githubRepo(repoRoot);
   if (!repo) return null;
 
-  const ask = (...filter) => execCommandJSON('gh', [
-    'pr', 'list', '--repo', repo, '--state', 'merged', ...filter,
-    '--json', 'headRefName,headRefOid',
+  const prs = execCommandJSON('gh', [
+    'pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '200',
+    '--json', 'headRefName,headRefOid,baseRefName',
   ]);
-  const fewWorktrees = branches.length <= 5;
-  const answers = fewWorktrees
-    ? branches.map(branch => ask('--head', branch))
-    : [ask('--limit', '200')];
-  if (!answers.every(Array.isArray)) return null;
-  return answers.flat().filter(pr => pr && typeof pr.headRefName === 'string');
+  if (!Array.isArray(prs)) return null;
+  return prs.filter(pr => pr && typeof pr.headRefName === 'string'
+    && pr.baseRefName === mainName);
 }
 
 /**
- * owner/name of origin when origin is on GitHub, or null. Accepts
- * https://github.com/o/n, git@github.com:o/n and ssh://git@github.com/o/n,
- * with or without .git.
+ * owner/name of origin when origin is on GitHub, or null. Takes https and ssh
+ * URLs, the scp form (git@github.com:o/n), a port, ssh.github.com, an ssh
+ * host alias written as github.com-<name>, any letter case, with or without
+ * .git. GitHub Enterprise hosts are not recognised.
  */
 function githubRepo(repoRoot) {
   const url = execCommand('git', ['-C', repoRoot, 'remote', 'get-url', 'origin']) || '';
-  const match = /^(?:https:\/\/(?:[^@/]+@)?github\.com\/|(?:ssh:\/\/)?git@github\.com[:/])([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/
+  const match = /^(?:[a-z][\w+.-]*:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i
     .exec(url);
-  return match ? `${match[1]}/${match[2]}` : null;
+  const onGitHub = match && /^(?:ssh\.|www\.)?github\.com(?:-[\w.-]+)?$/i.test(match[1]);
+  return onGitHub ? `${match[2]}/${match[3]}` : null;
 }
 
-/** Those of `candidates` git lists as merged into the main branch, or null. */
-function branchesMergedInGit(repoRoot, candidates) {
-  const main = resolveMainBranch(repoRoot);
-  if (!main) return null;
+/** Those of `candidates` git lists as merged into `mainRef`, or null. */
+function branchesMergedInGit(repoRoot, mainRef, candidates) {
   // --format, not the plain listing: that one marks a branch checked out in
   // another worktree with "+ ", and every bd-* branch here is one.
   const merged = execCommand('git', [
-    '-C', repoRoot, 'branch', '--format=%(refname:short)', '--merged', main,
+    '-C', repoRoot, 'branch', '--format=%(refname:short)', '--merged', mainRef,
   ]);
   if (merged === null) return null;
   return new Set(merged.split(/\r?\n/).map(name => name.trim())
@@ -295,11 +302,11 @@ function branchesMergedInGit(repoRoot, candidates) {
 }
 
 /**
- * The ref to measure merges against. The name comes from origin/HEAD, as a
- * clone records it; without it, main before master — a repository carrying
- * both has usually moved to main and kept the old one around. origin's copy
- * comes first: a local main nobody has pulled lately does not know what was
- * merged.
+ * The main branch: its name, and the ref to measure merges against. The name
+ * comes from origin/HEAD, as a clone records it; without it, main before
+ * master — a repository carrying both has usually moved to main and kept the
+ * old one around. origin's copy is the ref of choice: a local main nobody has
+ * pulled lately does not know what was merged.
  */
 function resolveMainBranch(repoRoot) {
   const git = (...args) => execCommand('git', ['-C', repoRoot, ...args]);
@@ -308,7 +315,7 @@ function resolveMainBranch(repoRoot) {
   for (const name of names) {
     const ref = [`refs/remotes/origin/${name}`, `refs/heads/${name}`]
       .find(candidate => git('rev-parse', '--verify', '--quiet', candidate));
-    if (ref) return ref;
+    if (ref) return { name, ref };
   }
   return null;
 }
@@ -359,24 +366,61 @@ function beadLines(bead) {
 /**
  * How to clean up, or why not to.
  *
- * `git worktree remove --force` deletes uncommitted work without asking, so it
- * is suggested only for a worktree whose status reads clean — whatever the
- * merge check above concluded. A locked worktree refuses a single --force,
- * and `&&` would then skip the prune. `bd worktree remove` is broken on
- * Windows (u51); the rules allow these two commands instead.
+ * Whatever the merge check above concluded, a removal command is printed only
+ * for a worktree read as clean — and without --force, so git's own check
+ * stays as a second net. A locked worktree refuses removal, and `&&` would
+ * then skip the prune. `bd worktree remove` is broken on Windows (u51); the
+ * rules allow git's own commands instead.
  */
 function cleanupLines(worktree) {
   if (worktree.locked) {
     return [`   It is locked (git worktree lock), so it is left alone: ${worktree.path}`];
   }
-  const status = execCommand('git', ['-C', worktree.path, 'status', '--porcelain']);
-  if (status !== '') {
+  if (!worktreeIsClean(worktree.path)) {
     return [
       '   Not suggesting removal: it holds uncommitted work, or its state could',
       `   not be read. Look at it by hand: ${worktree.path}`,
     ];
   }
-  return [`   Remove it: git worktree remove --force "${worktree.path}" && git worktree prune`];
+  return [
+    `   Remove it: git worktree remove "${worktree.path}" && git worktree prune`,
+    '   (ignored files in it, such as .env, go with the directory)',
+  ];
+}
+
+/**
+ * True only when git read this worktree and found nothing uncommitted.
+ *
+ * Plain `git status --porcelain` is not enough: it obeys
+ * status.showUntrackedFiles=no and a submodule's ignore = all, and it never
+ * shows a change in a file marked skip-worktree or assume-unchanged — every
+ * one of those was deleted in a test. And a worktree that lost its .git file
+ * sends `git -C` up to the main checkout, which would be read instead.
+ */
+function worktreeIsClean(worktreePath) {
+  if (!isLinkedWorktreeRoot(worktreePath)) return false;
+
+  const status = execCommand('git', [
+    '-C', worktreePath, 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none',
+  ]);
+  // -v tags each file: H is an ordinary one; S is skip-worktree, lower case
+  // is assume-unchanged. One line per file, hence the larger buffer.
+  const index = execCommand('git', ['-C', worktreePath, 'ls-files', '-v'],
+                            { maxBuffer: 64 * 1024 * 1024 });
+  return status === '' && index !== null
+    && index.split(/\r?\n/).every(line => line === '' || line.startsWith('H '));
+}
+
+/** True when `git -C` answers from this linked worktree's root, not from above it. */
+function isLinkedWorktreeRoot(worktreePath) {
+  const answer = execCommand('git', [
+    '-C', worktreePath, 'rev-parse', '--path-format=absolute',
+    '--git-dir', '--show-prefix', '--git-common-dir',
+  ]);
+  // The prefix sits in the middle, so an empty one survives the trim.
+  const [gitDir, prefix, commonDir, ...rest] = (answer || '').split(/\r?\n/);
+  return Boolean(gitDir && commonDir) && prefix === '' && gitDir !== commonDir
+    && rest.length === 0;
 }
 
 /** Open pull requests are easy to forget between sessions. */

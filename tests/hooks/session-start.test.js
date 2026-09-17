@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -84,6 +84,24 @@ describe('session-start on a project installed twice', () => {
 // Worktrees whose branch was merged
 // ---------------------------------------------------------------------------
 
+// Every temporary directory this file makes is removed once it is done — a
+// few hundred per run otherwise. Caught at fs.mkdtempSync, so each helper
+// above and below is covered without passing a list around; only our own
+// prefix is recorded.
+const madeHere = [];
+const mkdtemp = fs.mkdtempSync;
+fs.mkdtempSync = (prefix, ...rest) => {
+  const dir = mkdtemp(prefix, ...rest);
+  if (path.basename(String(prefix)).startsWith('session-start-')) madeHere.push(dir);
+  return dir;
+};
+afterAll(() => {
+  fs.mkdtempSync = mkdtemp;
+  for (const dir of madeHere) {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
 const onWindows = process.platform === 'win32';
 const GITHUB = 'https://github.com/acme/widgets.git';
 
@@ -91,7 +109,7 @@ const GITHUB = 'https://github.com/acme/widgets.git';
 function git(cwd, ...args) {
   const result = spawnSync('git', [
     '-c', 'user.name=test', '-c', 'user.email=test@example.com',
-    '-c', 'commit.gpgsign=false', ...args,
+    '-c', 'commit.gpgsign=false', '-c', 'protocol.file.allow=always', ...args,
   ], { cwd, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`git ${args.join(' ')}: ${result.stderr}`);
   return result.stdout.trim();
@@ -99,7 +117,7 @@ function git(cwd, ...args) {
 
 /**
  * A worktree .worktrees/<branch> in the repository at `dir`.
- *   work — 'merged': a commit of its own, merged into main;
+ *   work — 'merged': a commit of its own (work.txt), merged into main;
  *          'ahead':  a commit of its own and nothing more, the way a squash
  *                    merge leaves it: merged on GitHub, never an ancestor of
  *                    main;
@@ -109,7 +127,11 @@ function git(cwd, ...args) {
 function addWorktree(dir, branch, work) {
   const where = path.join(dir, '.worktrees', branch);
   git(dir, 'worktree', 'add', '-q', '-b', branch, where);
-  if (work !== 'fresh') git(where, 'commit', '-q', '--allow-empty', '-m', `work on ${branch}`);
+  if (work !== 'fresh') {
+    fs.writeFileSync(path.join(where, 'work.txt'), `${branch}\n`);
+    git(where, 'add', 'work.txt');
+    git(where, 'commit', '-q', '-m', `work on ${branch}`);
+  }
   if (work === 'merged') git(dir, 'merge', '-q', '--no-ff', '-m', `merge ${branch}`, branch);
   return git(where, 'rev-parse', '--show-toplevel');
 }
@@ -125,6 +147,9 @@ function repoWithWorktree({
 } = {}) {
   const dir = project();
   git(dir, 'init', '-q', '-b', main);
+  // As the installer's .gitignore entry does: the main checkout reads clean.
+  fs.mkdirSync(path.join(dir, '.git', 'info'), { recursive: true });
+  fs.appendFileSync(path.join(dir, '.git', 'info', 'exclude'), '\n.worktrees/\n');
   git(dir, 'commit', '-q', '--allow-empty', '-m', 'start');
   if (origin) git(dir, 'remote', 'add', 'origin', origin);
   const worktree = addWorktree(dir, branch, work);
@@ -174,9 +199,8 @@ function pathWith(dir) {
 
 /**
  * Fake gh and bd.
- *   prs   — the pull requests `gh pr list --state merged` knows for
- *           acme/widgets, as { headRefName, headRefOid }, or null for a gh
- *           that fails. Asked about any other repository — or about none,
+ *   prs   — the merged pull requests gh knows for acme/widgets, or null for a
+ *           gh that fails. Asked about any other repository — or about none,
  *           which is how gh without a default repository ends up answering
  *           about the fork's parent — it answers with an empty list.
  *   beads — what bd knows. Like the real one, `bd show` also answers a
@@ -193,9 +217,7 @@ const value = (flag) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : nu
 if (!args.includes('merged')) { console.log('[]'); process.exit(0); }
 const prs = ${JSON.stringify(prs)};
 if (prs === null) process.exit(1);
-if (value('--repo') !== 'acme/widgets') { console.log('[]'); process.exit(0); }
-const head = value('--head');
-console.log(JSON.stringify(prs.filter(pr => head === null || pr.headRefName === head)));
+console.log(JSON.stringify(value('--repo') === 'acme/widgets' ? prs : []));
 `);
   writeTool(dir, 'bd', `
 const [command, ...args] = process.argv.slice(2);
@@ -210,8 +232,10 @@ console.log(JSON.stringify(found));
   };
 }
 
-const pr = (headRefOid, headRefName = 'bd-x') => ({ headRefName, headRefOid });
+const pr = (headRefOid, { head = 'bd-x', base = 'main' } = {}) =>
+  ({ headRefName: head, headRefOid, baseRefName: base });
 const report = (repo, tools = fakeTools()) => runHook(repo.dir, tools.env).stdout;
+const REMOVE = 'git worktree remove';
 
 // A repository, a worktree and a dozen processes per test, several of them
 // through cmd.exe on Windows: on a loaded machine that neared the 15 s default.
@@ -225,8 +249,10 @@ describe('session-start on a worktree whose branch was merged', SLOW, () => {
     const out = report(repo);
 
     expect(out).toContain('branch bd-x was merged');
-    expect(out).toContain(`git worktree remove --force "${repo.worktree}"`);
-    expect(out).toContain('git worktree prune');
+    expect(out).toContain(`git worktree remove "${repo.worktree}" && git worktree prune`);
+    // No --force: git's own check stays in place as a second net.
+    expect(out).not.toContain('--force');
+    expect(out).toContain('ignored files');
   });
 
   it('takes the main branch from origin/HEAD, whatever it is called', () => {
@@ -249,17 +275,28 @@ describe('session-start on a worktree whose branch was merged', SLOW, () => {
     expect(report(repo)).toContain('branch bd-x was merged');
   });
 
-  it('finds a squash-merged branch among the merged pull requests', () => {
+  it('finds a squash-merged branch with one question to GitHub', () => {
     const repo = repoWithWorktree({ work: 'ahead', origin: GITHUB });
+    for (const n of [1, 2]) addWorktree(repo.dir, `bd-y${n}`, 'fresh');
     const tools = fakeTools({ prs: [pr(repo.tip())] });
 
     expect(report(repo, tools)).toContain('branch bd-x was merged');
-    // Few worktrees: each branch is asked about by name, however old its merge.
-    expect(tools.ghCalls()).toContain('--head bd-x');
+    const asked = tools.ghCalls().split('\n').filter(call => call.includes('merged'));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('--limit 200');
+    expect(asked[0]).toContain('baseRefName');
   });
 
-  it('asks GitHub about the origin repository, not whichever gh would pick', () => {
-    const repo = repoWithWorktree({ work: 'ahead', origin: 'git@github.com:acme/widgets.git' });
+  // Without --repo, gh with no default repository answers about the fork's
+  // parent: an empty list, exit 0 — indistinguishable from "nothing merged".
+  it.each([
+    'git@github.com:acme/widgets.git',
+    'git@github.com-work:acme/widgets.git',
+    'ssh://git@github.com:22/acme/widgets.git',
+    'ssh://git@ssh.github.com:443/acme/widgets.git',
+    'https://GitHub.com/acme/widgets',
+  ])('asks GitHub about origin by name, origin being %s', (origin) => {
+    const repo = repoWithWorktree({ work: 'ahead', origin });
     const tools = fakeTools({ prs: [pr(repo.tip())] });
 
     expect(report(repo, tools)).toContain('branch bd-x was merged');
@@ -281,7 +318,7 @@ describe('session-start on a worktree whose branch was merged', SLOW, () => {
     const repo = repoWithWorktree({ work: 'ahead', origin: GITHUB });
     const tools = fakeTools({ prs: [pr('0123456789abcdef0123456789abcdef01234567')] });
 
-    expect(report(repo, tools)).not.toContain('was merged');
+    expect(report(repo, tools)).not.toContain('merged');
   });
 
   it('does not count a pull request the branch has moved past', () => {
@@ -289,17 +326,14 @@ describe('session-start on a worktree whose branch was merged', SLOW, () => {
     const merged = repo.tip();
     git(repo.worktree, 'commit', '-q', '--allow-empty', '-m', 'after the merge');
 
-    expect(report(repo, fakeTools({ prs: [pr(merged)] }))).not.toContain('was merged');
+    expect(report(repo, fakeTools({ prs: [pr(merged)] }))).not.toContain('merged');
   });
 
-  it('asks GitHub once, not per branch, when there are many worktrees', () => {
-    const repo = repoWithWorktree({ work: 'fresh', origin: GITHUB });
-    for (const n of [1, 2, 3, 4, 5]) addWorktree(repo.dir, `bd-y${n}`, 'fresh');
-    const tools = fakeTools({ prs: [] });
-    report(repo, tools);
+  it('does not count a pull request merged into another branch', () => {
+    const repo = repoWithWorktree({ work: 'ahead', origin: GITHUB });
+    const tools = fakeTools({ prs: [pr(repo.tip(), { base: 'release' })] });
 
-    expect(tools.ghCalls()).toContain('--limit');
-    expect(tools.ghCalls()).not.toContain('--head');
+    expect(report(repo, tools)).not.toContain('merged');
   });
 
   it('says so when neither GitHub nor git can tell what was merged', () => {
@@ -315,14 +349,14 @@ describe('session-start on a worktree whose branch was merged', SLOW, () => {
 
   it('says nothing when the branch was not merged', () => {
     const repo = repoWithWorktree({ work: 'ahead', origin: GITHUB });
-    const out = report(repo, fakeTools({ prs: [pr(repo.tip(), 'bd-other')] }));
+    const out = report(repo, fakeTools({ prs: [pr(repo.tip(), { head: 'bd-other' })] }));
 
     expect(out).not.toContain('merged');
     expect(out).not.toContain('could not tell');
   });
 
   // git lists a branch with no commits of its own as merged: it sits on main's
-  // history too. The advice would be to force-remove a worktree in use.
+  // history too. The advice would be to remove a worktree in use.
   it('does not take a worktree nobody has committed in yet for a merged one', () => {
     const repo = repoWithWorktree({ work: 'fresh', origin: GITHUB });
 
@@ -339,14 +373,14 @@ describe('session-start on a worktree whose branch was merged', SLOW, () => {
 
   it('not after a commit was undone and its changes left uncommitted', () => {
     const repo = repoWithWorktree({ work: 'fresh' });
-    fs.writeFileSync(path.join(repo.worktree, 'work.txt'), 'unsaved');
-    git(repo.worktree, 'add', 'work.txt');
-    git(repo.worktree, 'commit', '-q', '-m', 'work');
+    fs.writeFileSync(path.join(repo.worktree, 'notes.txt'), 'unsaved');
+    git(repo.worktree, 'add', 'notes.txt');
+    git(repo.worktree, 'commit', '-q', '-m', 'notes');
     git(repo.worktree, 'reset', '-q', 'HEAD~1');
     const out = report(repo);
 
     expect(out).not.toContain('merged');
-    expect(out).not.toContain('--force');
+    expect(out).not.toContain(REMOVE);
   });
 
   it('not after the branch was reset to main and its work thrown away', () => {
@@ -371,36 +405,81 @@ describe('session-start on a worktree whose branch was merged', SLOW, () => {
   });
 });
 
+// Whatever the merge check gets wrong, the cleanup line must not delete work.
 describe('session-start on cleaning up a merged worktree', SLOW, () => {
-  // Whatever the merge check gets wrong, this line must not delete work.
-  it('does not suggest --force for a worktree with uncommitted work', () => {
+  const expectNoRemoval = (out) => {
+    expect(out).toContain('branch bd-x was merged');
+    expect(out).toContain('by hand');
+    expect(out).not.toContain(REMOVE);
+  };
+
+  it('does not suggest removing a worktree with uncommitted work', () => {
     const repo = repoWithWorktree();
     fs.writeFileSync(path.join(repo.worktree, 'notes.txt'), 'unsaved');
     const out = report(repo);
 
-    expect(out).toContain('branch bd-x was merged');
+    expectNoRemoval(out);
     expect(out).toContain('uncommitted work');
-    expect(out).not.toContain('--force');
   });
 
-  it('does not suggest --force for a worktree whose state cannot be read', () => {
+  // Under this setting plain `git worktree remove` deletes the file as well.
+  it('sees an untracked file where git status is told to hide them', () => {
+    const repo = repoWithWorktree();
+    git(repo.dir, 'config', 'status.showUntrackedFiles', 'no');
+    fs.writeFileSync(path.join(repo.worktree, 'notes.txt'), 'unsaved');
+
+    expectNoRemoval(report(repo));
+  });
+
+  it.each(['--skip-worktree', '--assume-unchanged'])(
+    'sees a change git status skips, in a file marked %s', (flag) => {
+      const repo = repoWithWorktree();
+      git(repo.worktree, 'update-index', flag, 'work.txt');
+      fs.appendFileSync(path.join(repo.worktree, 'work.txt'), 'unsaved\n');
+
+      expectNoRemoval(report(repo));
+    });
+
+  it('sees a change inside a submodule marked ignore = all', () => {
+    const library = project();
+    git(library, 'init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(library, 'lib.txt'), 'v1\n');
+    git(library, 'add', 'lib.txt');
+    git(library, 'commit', '-q', '-m', 'lib');
+    const repo = repoWithWorktree({ work: 'fresh' });
+    git(repo.worktree, 'submodule', '-q', 'add', library, 'lib');
+    git(repo.worktree, 'config', '-f', '.gitmodules', 'submodule.lib.ignore', 'all');
+    git(repo.worktree, 'add', '.gitmodules');
+    git(repo.worktree, 'commit', '-q', '-m', 'add lib');
+    git(repo.dir, 'merge', '-q', '--no-ff', '-m', 'merge bd-x', 'bd-x');
+    fs.appendFileSync(path.join(repo.worktree, 'lib', 'lib.txt'), 'unsaved\n');
+
+    expectNoRemoval(report(repo));
+  });
+
+  it('does not suggest removing a worktree whose directory is gone', () => {
     const repo = repoWithWorktree();
     fs.rmSync(repo.worktree, { recursive: true, force: true });
-    const out = report(repo);
 
-    expect(out).toContain('branch bd-x was merged');
-    expect(out).toContain('by hand');
-    expect(out).not.toContain('--force');
+    expectNoRemoval(report(repo));
   });
 
-  // A locked worktree refuses a single --force, and && would skip the prune.
+  // Without it, git -C climbs to the main checkout and reads that instead.
+  it('does not suggest removing a worktree that lost its .git file', () => {
+    const repo = repoWithWorktree();
+    fs.rmSync(path.join(repo.worktree, '.git'));
+
+    expectNoRemoval(report(repo));
+  });
+
+  // A locked worktree refuses removal, and && would skip the prune.
   it('says a locked worktree is locked instead of a command that fails', () => {
     const repo = repoWithWorktree();
     git(repo.dir, 'worktree', 'lock', repo.worktree);
     const out = report(repo);
 
     expect(out).toContain('locked');
-    expect(out).not.toContain('--force');
+    expect(out).not.toContain(REMOVE);
   });
 
   it('says a branch without a reflog only looks merged, and suggests nothing', () => {
@@ -410,7 +489,7 @@ describe('session-start on cleaning up a merged worktree', SLOW, () => {
 
     expect(out).toContain('branch bd-x looks merged');
     expect(out).not.toContain('was merged');
-    expect(out).not.toContain('--force');
+    expect(out).not.toContain(REMOVE);
   });
 });
 
