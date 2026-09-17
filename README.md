@@ -63,13 +63,16 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
   squash-merged pull request, and missed every worktree branch anyway,
   because git lists those with a `+ ` in front. It never fired and never
   said why. The main branch now comes from `origin/HEAD` (origin's copy
-  first), merged branches from both GitHub — `gh pr list --state merged`
-  about origin, matched by the merged commit, not just the branch name —
-  and `git branch --merged`, and when neither answers the session is told.
-  A branch nobody has committed on yet, or whose commit was undone, is not
-  taken for a merged one. `git worktree remove --force` is suggested only
-  for a clean, unlocked worktree; anything else is left for a look by hand.
-  The bead id is printed only when bd confirms it.
+  first). Merged branches come from git — counted only when the branch tip
+  is a commit made on it, so a fresh branch or an undone commit does not
+  count — and from one `gh pr list --state merged` about origin, counted
+  only when the pull request went into the main branch and contains the
+  worktree's tip (the latest 200 merges are seen). When neither answers,
+  the session is told. `git worktree remove`, without `--force`, is
+  suggested only for an unlocked worktree git reads as clean — untracked
+  files, skip-worktree and assume-unchanged changes and submodules
+  included — and the hint says that ignored files such as `.env` go with
+  it. The bead id is printed only when bd confirms it.
 
 ### v3.9.2 (2026-09-07)
 
