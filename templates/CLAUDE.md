@@ -59,8 +59,10 @@ bd dep relate {NEW_ID} {OLD_ID}
 
 ## Agents
 
-- code-reviewer — adversarial review with DEMO verification
-- merge-supervisor — conflict resolution
+- code-reviewer — reviews a bead's branch, PR or commit range against the task
+  and returns findings pinned to the head SHA; follows the bead-review skill,
+  changes nothing
+- merge-supervisor — conflict resolution for merge, rebase and cherry-pick
 
 <!-- claude-protocol:end -->
 

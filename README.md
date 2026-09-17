@@ -97,6 +97,15 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
   files, skip-worktree and assume-unchanged changes and submodules
   included — and the hint says that ignored files such as `.env` go with
   it. The bead id is printed only when bd confirms it.
+- **A review skill, and `code-reviewer` built on it** — `bead-review` checks a
+  bead's branch, PR or commit range against the task and its acceptance
+  criteria, and reports findings R1, R2… pinned to the head SHA, keeping their
+  numbers on a re-review. `code-reviewer` now preloads the skill instead of
+  carrying a procedure of its own: it no longer demands DEMO blocks that no
+  rule asked implementers to write, no longer pins `model: haiku`, and no
+  longer assumes the diff is `main...bd-<id>`. Both install through `npx` and
+  the plugin alike. An agent copy you never edited is replaced on upgrade; an
+  edited one is a question, as before.
 
 ### v3.9.2 (2026-09-07)
 
@@ -260,7 +269,7 @@ Full details: [docs/decisions-en.md](docs/decisions-en.md)
 ```
 .claude/
   agents/
-    code-reviewer.md        # Adversarial 3-phase review
+    code-reviewer.md        # Reviews a bead, following bead-review
     merge-supervisor.md     # Conflict resolution protocol
   hooks/                    # 3 Node.js enforcement hooks, shared utils,
                             # and the update checker they spawn
@@ -275,6 +284,7 @@ Full details: [docs/decisions-en.md](docs/decisions-en.md)
     resilience-standard.md
   skills/
     project-discovery/      # Extracts project conventions
+    bead-review/            # Review procedure and the request form
   settings.json             # Hook configuration
   .manifest.json            # File hashes for safe upgrades
 CLAUDE.md                   # Orchestrator instructions
@@ -361,10 +371,10 @@ and an old `bd` fails those one at a time with no explanation.
 ### Install as a plugin
 
 The same thing, installed through Claude Code's own plugin system. The plugin
-carries the hooks, the agents and the project-discovery skill, and updates them
-for you. What a plugin cannot carry is the half that has to live in the
-project — the beads database, `.claude/rules/*.md` and the block in
-`CLAUDE.md` — so one command lays that half down.
+carries the hooks, the agents and the skills (project-discovery and
+bead-review), and updates them for you. What a plugin cannot carry is the half
+that has to live in the project — the beads database, `.claude/rules/*.md` and
+the block in `CLAUDE.md` — so one command lays that half down.
 
 ```
 /plugin marketplace add weselow/claude-protocol
@@ -515,6 +525,46 @@ sent back to work, in every permission mode, unless:
 - that worktree has nothing uncommitted
 - its branch is on origin at the worktree's commit (skipped when there is no
   origin or it cannot be reached)
+
+### Reviewing a bead
+
+When an implementer leaves `AWAITING REVIEW`, hand the work to the
+`code-reviewer` agent, or run the skill yourself: `/bead-review` after an `npx`
+install, `/claude-protocol:bead-review` with the plugin. Both follow one
+procedure, the skill's `SKILL.md`: read the project's rules and the bead, pin
+the base and head SHAs, read the change and the code around it, run what the
+verdict depends on, then report. After an `npx` install the skill is in
+`.claude/skills/bead-review/`; the plugin keeps it in its own
+`templates/skills/bead-review/`.
+
+The report names the head SHA it checked and ends in `changes needed` or `no
+blocking findings`. Findings are numbered R1, R2… and keep their numbers on a
+re-review. Defects carry a priority and are kept apart from questions and
+optional suggestions, and each one cites `file:line` or a command with its
+output. The reviewer changes no code and posts to the PR or the bead only when
+asked. It never merges or closes anything: the user closes the bead after
+merging.
+
+Requests that work:
+
+```
+Review bead proj-42, PR #57.
+Review proj-42 on main...bd-proj-42 at 3f2c1ab. npm test passes.
+Review proj-42, commits 1a2b3c4..3f2c1ab.
+Re-review proj-42 at 9e81d04. Previous report above; R1, R3 fixed, R2 disputed.
+```
+
+A range that starts with a branch name (`main...bd-proj-42`, and
+`main..bd-proj-42` too) is reviewed from the point where the branches split;
+otherwise everything `main` gained after the work began would look deleted by
+the implementer. A range of two commit SHAs is taken as given.
+
+A lead or an implementer asking for a review can fill in the form in the
+skill's `handoff.md`. The skill is called `bead-review`,
+not `code-review`, so that it does not replace Claude Code's own
+`/code-review`. Apart from one short section, nothing in it is specific to
+Claude Code, so an agent that reads the same SKILL.md format, such as Codex,
+can follow it too.
 
 ## Hooks
 
