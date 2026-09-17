@@ -51,7 +51,8 @@ function verifyChecklist(message, beadId) {
       'requirement to the report:\nChecklist:\n- [x] requirement 1\n- [x] requirement 2'
     );
   }
-  const unchecked = message.match(/- \[ \]/g);
+  // An item is a line of its own: a report may well mention "- [ ]" in prose.
+  const unchecked = message.match(/^\s*- \[ \]/gm);
   if (unchecked) {
     block(
       `The Checklist has ${unchecked.length} unchecked item(s).\n\n` +

@@ -1,10 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
 const HOOK_PATH = path.resolve(__dirname, '../../templates/hooks/validate-completion.cjs');
+
+// Every test builds real repositories, a dozen git processes each. On a busy
+// Windows machine one of them took 17s, past the suite's 15s default.
+vi.setConfig({ testTimeout: 60000 });
 
 // The bead id and the worktree name differ on purpose: projects with an id
 // prefix name the worktree after the number alone, and building the path from
@@ -150,6 +154,19 @@ describe('validate-completion: the checklist', () => {
     const checklist = '- [x] first\n- [ ] second';
     const decision = runHook(dir, { last_assistant_message: report({ checklist }) });
     expect(decision.decision).toBe('block');
+    expect(decision.reason).toContain('1 unchecked');
+  });
+
+  it('counts only lines that are unchecked items, not a mention of one', () => {
+    const { dir } = shared();
+    const checklist = '- [x] the hook blocks on `- [ ]` items\n  - [x] nested and ticked';
+    expect(runHook(dir, { last_assistant_message: report({ checklist }) })).toEqual(APPROVE);
+  });
+
+  it('counts an indented unchecked item', () => {
+    const { dir } = shared();
+    const checklist = '- [x] first\n   - [ ] nested and open';
+    const decision = runHook(dir, { last_assistant_message: report({ checklist }) });
     expect(decision.reason).toContain('1 unchecked');
   });
 
