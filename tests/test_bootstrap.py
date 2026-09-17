@@ -2133,6 +2133,25 @@ class TestEveryManagedFileKeepsThePromise:
         assert dest.exists()
         assert manifest["files"][rel_key] == file_sha256(dest)
 
+    def test_an_older_copy_nobody_edited_is_replaced_silently(
+            self, tmp_path, kind, monkeypatch):
+        """The upgrade itself: the file is there, its hash is on record, and
+        ours has changed since - an agent rewritten between two releases."""
+        monkeypatch.setattr("builtins.input", _explode)
+        rel_key = MANAGED[kind]
+        dest = tmp_path / ".claude" / rel_key
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        write_verbatim(dest, "the version we shipped last time\n")
+        manifest = {"files": {rel_key: file_sha256(dest)}}
+
+        installer = _install_kind(tmp_path, kind, manifest)
+
+        ours = read_verbatim(TEMPLATES_DIR / rel_key).replace("[Project]", "Demo")
+        assert read_verbatim(dest) == ours
+        assert rel_key not in installer.skipped
+        assert not (tmp_path / ".claude" / ".upgrades").exists()
+        assert manifest["files"][rel_key] == file_sha256(dest)
+
 
 class TestPromptWiring:
     def _run(self, tmp_path, monkeypatch, argv, isatty=True):
@@ -3270,6 +3289,77 @@ class TestPluginManifests:
 
         for needed in (".claude-plugin/", "hooks/", "templates/"):
             assert needed in shipped, f"package.json does not ship {needed}"
+
+
+# ============================================================================
+# Agents preload skills we ship
+# ============================================================================
+# An agent names skills in its frontmatter and Claude Code preloads their text
+# when the agent starts. A name that matches no skill is skipped with a line in
+# the debug log and nowhere else, so a typo or a renamed skill leaves the agent
+# running without its procedure and nobody notices. Measured on Claude Code
+# 2.1.274: the bare name resolves in an npx install and inside the plugin
+# alike; the plugin-qualified one (claude-protocol:x) only inside the plugin.
+
+
+def _frontmatter_list(path, key):
+    """A list field of a Markdown file's frontmatter, in either YAML form."""
+    lines = read_verbatim(path).splitlines()
+    end = lines.index("---", 1)
+    values, in_list = [], False
+    for line in lines[1:end]:
+        if line.startswith(f"{key}:"):
+            inline = line[len(key) + 1:].strip().strip("[]")
+            values += [v.strip() for v in inline.split(",") if v.strip()]
+            in_list = not inline
+        elif in_list and line.lstrip().startswith("- "):
+            values.append(line.lstrip()[2:].strip())
+        else:
+            in_list = False
+    return values
+
+
+def _shipped_skill_names():
+    """What each skill under templates/skills calls itself."""
+    return {
+        name
+        for skill in (TEMPLATES_DIR / "skills").glob("*/SKILL.md")
+        for name in _frontmatter_list(skill, "name")
+    }
+
+
+SHIPPED_AGENTS = sorted((TEMPLATES_DIR / "agents").glob("*.md"))
+REVIEWER = TEMPLATES_DIR / "agents" / "code-reviewer.md"
+
+
+class TestAgentsPreloadShippedSkills:
+    def test_every_skill_is_called_by_its_directory_name(self):
+        """Claude Code finds a skill by its name, the installer and the
+        plugin by its directory; the two have to agree."""
+        for skill in (TEMPLATES_DIR / "skills").glob("*/SKILL.md"):
+            assert _frontmatter_list(skill, "name") == [skill.parent.name]
+
+    @pytest.mark.parametrize("agent", SHIPPED_AGENTS, ids=lambda p: p.name)
+    def test_every_preloaded_skill_is_one_we_ship(self, agent):
+        for name in _frontmatter_list(agent, "skills"):
+            assert ":" not in name, (
+                f"{agent.name} names {name}: a plugin-qualified name is "
+                "skipped in an npx install")
+            assert name in _shipped_skill_names(), \
+                f"{agent.name} preloads {name}, which templates/skills does not ship"
+
+    def test_the_reviewer_follows_the_review_skill(self):
+        assert _frontmatter_list(REVIEWER, "skills") == ["bead-review"]
+
+    def test_the_reviewer_cannot_edit_files(self):
+        tools = set(_frontmatter_list(REVIEWER, "tools"))
+        assert tools, "no tool list means every tool, editing included"
+        assert not tools & {"Write", "Edit", "NotebookEdit"}
+
+    def test_the_reviewer_leaves_the_model_to_the_user(self):
+        """A model in the agent file outranks CLAUDE_CODE_SUBAGENT_MODEL and
+        the session's own model; the review is only as good as that model."""
+        assert not _frontmatter_list(REVIEWER, "model")
 
 
 # ============================================================================
