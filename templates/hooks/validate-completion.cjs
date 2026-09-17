@@ -26,12 +26,13 @@ const {
 } = require('./hook-utils.cjs');
 
 // A report marker opens a line. Anything but a letter or a digit may stand in
-// front of it — a heading mark, bold, a backtick, an emoji. A marker inside a
+// front of it — a heading mark, bold, a backtick, an emoji — and between its
+// parts: "BEAD `x` COMPLETE", "BEAD: x — COMPLETE". A marker inside a
 // sentence, or one whose id is a placeholder ({BEAD_ID}, <id>), is not a report.
-const REPORT = /^[^\p{L}\p{N}]*BEAD\s+([\p{L}\p{N}._-]+)[^\s\p{L}\p{N}]*\s+COMPLETE/u;
-// A checklist item: "- [x]", "* [ ]", "+ [✅]", "1. [ ]", "2) [✔️]". The box
+const REPORT = /^[^\p{L}\p{N}]*BEAD[^\p{L}\p{N}{<]+([\p{L}\p{N}][\p{L}\p{N}._-]*)[^\p{L}\p{N}{}<>]+COMPLETE/u;
+// A checklist item: "- [x]", "* [ ]", "+ [✅]", "1. [  ]", "2) [✔️]". The box
 // holds one character at most, so a markdown link "- [a](url)" is not one.
-const ITEM = /^\s*(?:[-*+]|\d+[.)])\s+\[(\s?|[^\s\]]\uFE0F?)\](?=\s|$)/u;
+const ITEM = /^\s*(?:[-*+]|\d+[.)])\s+\[(\s*|[^\s\]]\uFE0F?)\](?=\s|$)/u;
 // A bullet with a tick instead of a box: "- ✅ done", "- ❌ not done".
 const EMOJI_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+(✅|✔\uFE0F?|☑\uFE0F?|❌|⬜|☐)/u;
 const TICKED = new Set(['x', 'X', '✓', '✔', '✅', '☑']);
@@ -229,16 +230,18 @@ function verifyLinkedWorktree(worktree) {
 }
 
 /**
- * True for the top of the main checkout. A git without --path-format (older
- * than 2.31) cannot say it that way; then the .git entry answers: a file in a
- * linked worktree, a directory in the main checkout. Nothing readable counts
- * as the main checkout — a check that cannot run must not pass.
+ * True for the top of the main checkout. A git older than 2.31 does not know
+ * --path-format and does not fail on it either: it prints the flag back. So
+ * the answer counts only as exactly two paths; otherwise the .git entry
+ * answers: a file in a linked worktree, a directory in the main checkout.
+ * Nothing readable counts as the main checkout — a check that cannot run must
+ * not pass.
  */
 function isMainCheckout(worktree) {
   const dirs = git(worktree, 'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir');
-  if (dirs) {
-    const [own, common] = dirs.split(/\r?\n/);
-    return own === common;
+  const lines = dirs ? dirs.split(/\r?\n/) : [];
+  if (lines.length === 2 && lines.every(line => line && !line.startsWith('-'))) {
+    return lines[0] === lines[1];
   }
   try {
     return !fs.statSync(path.join(worktree, '.git')).isFile();
@@ -247,9 +250,15 @@ function isMainCheckout(worktree) {
   }
 }
 
-/** Block when the worktree has anything uncommitted. */
+/** Block when the worktree has anything uncommitted, or git cannot tell. */
 function verifyCommitted(worktree) {
   const status = git(worktree, 'status', '--porcelain');
+  if (status === null) {
+    block(
+      `git could not read the worktree status: ${worktree}\n\n` +
+      `Run \`git status\` there, fix what it reports, and commit.`
+    );
+  }
   if (!status) return;
   block(
     `The worktree has uncommitted changes: ${worktree}\n\n${status}\n\n` +

@@ -97,23 +97,38 @@ function report({ worktree = WORKTREE, checklist = '- [x] the requirement' } = {
 }
 
 /**
- * PATH holding a git that predates --path-format (2.31): it refuses that
- * option and hands everything else to the real git. On Windows the wrapper is
- * a .cmd, so the real git must not be on PATH at all, or it would be found first.
+ * PATH holding a git that predates --path-format (2.31). Such a git does not
+ * fail on the flag: rev-parse prints it back and exits 0 ('echo'). The 'fail'
+ * mode exits non-zero instead, for a git that breaks some other way.
+ * Everything else goes to the real git. On Windows the wrapper is a .cmd, so
+ * the real git must not be on PATH at all, or it would be found first.
  */
-function oldGitPath() {
+function oldGitPath(mode) {
   const dir = tmp('validate-completion-oldgit-');
   const win = process.platform === 'win32';
   const real = spawnSync(win ? 'where' : 'which', ['git'], { encoding: 'utf8' }).stdout
     .split(/\r?\n/).map(line => line.trim()).find(line => line && (!win || /\.exe$/i.test(line)));
+  const shim = path.join(dir, 'old-git.js');
+  fs.writeFileSync(shim, [
+    "const { spawnSync } = require('child_process');",
+    "const fs = require('fs');",
+    'const args = process.argv.slice(2);',
+    "const at = args.indexOf('--path-format=absolute');",
+    'if (at >= 0) {',
+    `  if (${JSON.stringify(mode)} === 'fail') process.exit(129);`,
+    "  fs.writeSync(1, args[at] + '\\n');",
+    '  args.splice(at, 1);',
+    '}',
+    `const r = spawnSync(${JSON.stringify(real)}, args, { stdio: 'inherit' });`,
+    'process.exit(r.status === null ? 1 : r.status);',
+  ].join('\n'));
+  const run = `"${process.execPath}" "${shim}"`;
   if (win) {
-    fs.writeFileSync(path.join(dir, 'git.cmd'), ['@echo off',
-      'echo %* | findstr /C:"--path-format" >nul && exit /b 129',
-      `"${real}" %*`, ''].join('\r\n'));
+    fs.writeFileSync(path.join(dir, 'git.cmd'), `@${run} %*\r\n`);
     return [dir, path.join(process.env.SystemRoot || 'C:\\Windows', 'System32')].join(path.delimiter);
   }
   const script = path.join(dir, 'git');
-  fs.writeFileSync(script, `#!/bin/sh\ncase "$*" in *--path-format*) exit 129;; esac\nexec "${real}" "$@"\n`);
+  fs.writeFileSync(script, `#!/bin/sh\nexec ${run} "$@"\n`);
   fs.chmodSync(script, 0o755);
   return `${dir}${path.delimiter}${process.env.PATH}`;
 }
@@ -304,6 +319,25 @@ describe('validate-completion: the checklist', () => {
     expect(decision.reason).toContain('1 unchecked');
   });
 
+  it.each([
+    ['in backticks', 'BEAD `ID` COMPLETE'],
+    ['in bold', 'BEAD **ID** COMPLETE'],
+    ['followed by a dash', 'BEAD ID — COMPLETE'],
+    ['after a colon', 'BEAD: ID COMPLETE'],
+  ])('reads a report whose id is %s', (_, marker) => {
+    const { dir } = shared();
+    const message = report({ checklist: '- [ ] not done' })
+      .replace(`BEAD ${BEAD_ID} COMPLETE`, marker.replace('ID', BEAD_ID));
+    const decision = runHook(dir, { last_assistant_message: message });
+    expect(decision.reason).toContain('1 unchecked');
+  });
+
+  it('counts a box with two spaces as unchecked', () => {
+    const { dir } = shared();
+    const decision = runHook(dir, { last_assistant_message: report({ checklist: '- [x] a\n- [  ] b' }) });
+    expect(decision.reason).toContain('1 unchecked');
+  });
+
   it('reads a report under a heading or in bold', () => {
     const { dir } = shared();
     const open = report({ checklist: '- [ ] not done' });
@@ -455,6 +489,16 @@ describe('validate-completion: the worktree', () => {
     expect(decision.reason).toContain(plain);
   });
 
+  it('blocks when the worktree status cannot be read', () => {
+    const { dir, worktree } = project();
+    const gitDir = git(worktree, 'rev-parse', '--absolute-git-dir');
+    fs.writeFileSync(path.join(gitDir, 'index'), 'not an index');
+    const decision = runHook(dir);
+    expect(decision.decision).toBe('block');
+    expect(decision.reason).toContain('could not read');
+    expect(decision.reason).toContain(worktree);
+  });
+
   it('blocks on uncommitted changes and names the file', () => {
     const { dir, worktree } = project();
     fs.writeFileSync(path.join(worktree, 'forgotten.txt'), 'not committed\n');
@@ -465,17 +509,17 @@ describe('validate-completion: the worktree', () => {
 });
 
 describe('validate-completion: on a git older than --path-format', () => {
-  it('still blocks the main checkout', () => {
+  it.each(['echo', 'fail'])('still blocks the main checkout (%s)', (mode) => {
     const { dir } = shared();
     const decision = runHook(dir, { last_assistant_message: report({ worktree: '.' }) },
-      { PATH: oldGitPath() });
+      { PATH: oldGitPath(mode) });
     expect(decision.decision).toBe('block');
     expect(decision.reason).toContain('main checkout');
   });
 
   it('still approves a linked worktree', () => {
     const { dir } = shared();
-    expect(runHook(dir, {}, { PATH: oldGitPath() })).toEqual(APPROVE);
+    expect(runHook(dir, {}, { PATH: oldGitPath('echo') })).toEqual(APPROVE);
   });
 });
 
