@@ -12,7 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  injectText, execCommand, getProjectDir, runHook,
+  injectText, execCommand, execCommandJSON, getProjectDir, runHook,
   parseBdVersion, versionBelow, BD_MIN_VERSION,
   hasBeads, isPluginInstall, readOwnVersion, updateNotice,
   leftoverProjectHooks,
@@ -119,34 +119,163 @@ function collectDirtyWarning(repoRoot, output) {
   output.push('');
 }
 
-/** A merged branch whose worktree and bead are still around. */
+/**
+ * A .worktrees/bd-* worktree whose branch was merged, and its bead.
+ *
+ * For a long time this check never fired, and nothing said so: it asked git
+ * about a branch literally called main, git ancestry cannot see a squash
+ * merge, and the plain `git branch` listing marks every worktree's branch with
+ * "+ ", so no name ever matched. A check that fails quietly looks exactly like
+ * one with nothing to report — when neither source can answer, that is said.
+ */
 function collectMergedWorktrees(projectDir, repoRoot, output) {
   if (!repoRoot || !fs.existsSync(path.join(projectDir, '.worktrees'))) return;
 
-  const worktreeList = execCommand('git', ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
-  if (!worktreeList) return;
+  const worktrees = listBeadWorktrees(repoRoot);
+  if (worktrees.length === 0) return;
 
-  const worktreeLines = worktreeList.split('\n')
-    .filter(line => line.startsWith('worktree ') && line.includes('.worktrees/bd-'));
-
-  // Hoist git branch --merged outside the loop (was called per-worktree before)
-  const merged = execCommand('git', ['-C', repoRoot, 'branch', '--merged', 'main']);
-  const mergedBranches = merged
-    ? merged.split('\n').map(b => b.trim().replace(/^\*\s*/, ''))
-    : [];
-
-  for (const line of worktreeLines) {
-    const wtPath = line.replace('worktree ', '').trim();
-    const dirName = path.basename(wtPath);
-
-    // Exact match prevents bd-1 matching bd-10
-    if (!mergedBranches.includes(dirName)) continue;
-
-    const beadId = dirName.replace('bd-', '');
-    output.push(`ACTION REQUIRED: ${dirName} was merged but bead "${beadId}" is still open.`);
-    output.push(`   Run: bd close "${beadId}" && git worktree remove "${wtPath}"`);
+  const merged = collectMergedBranches(repoRoot, worktrees.map(worktree => worktree.branch));
+  if (!merged) {
+    output.push('WARNING: could not tell which .worktrees/bd-* branches were merged.');
+    output.push('   Neither gh (merged pull requests) nor git (branches merged into');
+    output.push('   the main branch) answered, so leftover worktrees go unreported.');
     output.push('');
+    return;
   }
+
+  const done = worktrees.filter(worktree => merged.has(worktree.branch));
+  if (done.length === 0) return;
+
+  const beads = confirmedBeads(done.map(worktree => worktree.beadGuess));
+  for (const worktree of done) {
+    reportMergedWorktree(worktree, beads.get(worktree.beadGuess), output);
+  }
+}
+
+/** Worktrees under .worktrees/bd-*, with the branch each one has checked out. */
+function listBeadWorktrees(repoRoot) {
+  const list = execCommand('git', ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
+  if (!list) return [];
+
+  const worktrees = [];
+  for (const entry of list.split(/\r?\n\r?\n/)) {
+    const lines = entry.split(/\r?\n/);
+    const where = lines.find(line => line.startsWith('worktree '));
+    const ref = lines.find(line => line.startsWith('branch refs/heads/'));
+    // A detached worktree has no branch that could have been merged.
+    if (!where || !ref || !where.includes('.worktrees/bd-')) continue;
+
+    const branch = ref.slice('branch refs/heads/'.length);
+    worktrees.push({
+      path: where.slice('worktree '.length),
+      branch,
+      beadGuess: branch.startsWith('bd-') ? branch.slice('bd-'.length) : '',
+    });
+  }
+  return worktrees;
+}
+
+/**
+ * Names of merged branches, or null when no source could answer.
+ *
+ * Two sources, because each misses what the other sees: a squash-merged pull
+ * request never becomes an ancestor of the main branch, and a branch merged
+ * locally never shows up on GitHub. git is asked about `candidates` only.
+ */
+function collectMergedBranches(repoRoot, candidates) {
+  const fromGitHub = mergedPullRequestBranches();
+  const fromGit = branchesMergedInGit(repoRoot, candidates);
+  if (!fromGitHub && !fromGit) return null;
+  return new Set([...(fromGitHub || []), ...(fromGit || [])]);
+}
+
+function mergedPullRequestBranches() {
+  const prs = execCommandJSON('gh', [
+    'pr', 'list', '--state', 'merged', '--limit', '100', '--json', 'headRefName',
+  ]);
+  if (!Array.isArray(prs)) return null;
+  return prs.map(pr => pr && pr.headRefName).filter(Boolean);
+}
+
+function branchesMergedInGit(repoRoot, candidates) {
+  const main = resolveMainBranch(repoRoot);
+  if (!main) return null;
+  // --format, not the plain listing: that one marks a branch checked out in
+  // another worktree with "+ ", and every bd-* branch here is one.
+  const merged = execCommand('git', [
+    '-C', repoRoot, 'branch', '--format=%(refname:short)', '--merged', main,
+  ]);
+  if (merged === null) return null;
+  return merged.split(/\r?\n/).map(name => name.trim())
+    .filter(name => candidates.includes(name) && hasOwnCommits(repoRoot, name));
+}
+
+/**
+ * True when someone ever committed on this branch.
+ *
+ * `git branch --merged` also lists a branch with no commits of its own — it
+ * sits on the main branch's history as well. That is every worktree created a
+ * minute ago, and the advice would be to force-remove it while someone works
+ * in it. The branch's own reflog tells the two apart. A branch whose reflog is
+ * gone counts as not merged: a cleanup nobody hears about costs less than a
+ * worktree removed from under someone.
+ */
+function hasOwnCommits(repoRoot, branch) {
+  const reflog = execCommand('git', [
+    '-C', repoRoot, 'reflog', 'show', '--format=%gs', `refs/heads/${branch}`, '--',
+  ]);
+  return Boolean(reflog) && reflog.split(/\r?\n/).some(entry => entry.startsWith('commit'));
+}
+
+/**
+ * The main branch: whatever origin/HEAD names, as a clone records it.
+ * Without it, main before master — a repository carrying both has usually
+ * moved to main and kept the old one around.
+ */
+function resolveMainBranch(repoRoot) {
+  const git = (...args) => execCommand('git', ['-C', repoRoot, ...args]);
+  const head = git('symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD');
+  if (head) return head.replace(/^refs\/remotes\/origin\//, '');
+  return ['main', 'master']
+    .find(name => git('rev-parse', '--verify', '--quiet', `refs/heads/${name}`)) || null;
+}
+
+/**
+ * The beads bd knows by exactly these ids, one `bd show` for all of them.
+ *
+ * A worktree's name is only a guess at its bead's id: in a project whose ids
+ * carry a prefix, bd-219 is not the id of anything. And `bd show` answers a
+ * partial id with whatever bead it matches, so a bead counts only when its id
+ * comes back unchanged.
+ */
+function confirmedBeads(guesses) {
+  const ids = guesses.filter(Boolean);
+  const beads = new Map();
+  if (ids.length === 0) return beads;
+
+  const found = execCommandJSON('bd', ['show', '--json', '--', ...ids]);
+  for (const bead of (Array.isArray(found) ? found : [])) {
+    if (bead && ids.includes(bead.id) && typeof bead.status === 'string') {
+      beads.set(bead.id, bead);
+    }
+  }
+  return beads;
+}
+
+/**
+ * The cleanup is `git worktree remove --force` and `git worktree prune`:
+ * `bd worktree remove` is broken on Windows (u51), and the rules allow these.
+ */
+function reportMergedWorktree(worktree, bead, output) {
+  output.push(`ACTION REQUIRED: branch ${worktree.branch} was merged, but its worktree is still here.`);
+  if (!bead) {
+    output.push('   bd did not confirm which bead it belongs to — look the bead up and');
+    output.push('   close it if it is still open.');
+  } else if (bead.status !== 'closed') {
+    output.push(`   Its bead ${bead.id} is still ${bead.status}: bd close "${bead.id}"`);
+  }
+  output.push(`   Remove it: git worktree remove --force "${worktree.path}" && git worktree prune`);
+  output.push('');
 }
 
 /** Open pull requests are easy to forget between sessions. */
