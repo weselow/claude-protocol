@@ -7,7 +7,7 @@ Creates:
 - .claude/agents/ with code-reviewer and merge-supervisor
 - .claude/hooks/ with enforcement hooks (Node.js)
 - .claude/rules/ with beads-workflow and optional dev rules
-- .claude/skills/ with project-discovery
+- .claude/skills/ with every skill in templates/skills
 - .claude/settings.json with hook configuration
 - .claude/.manifest.json with file hashes for safe upgrades
 - .claude/.upgrades/ with new versions of user-modified files
@@ -1395,8 +1395,8 @@ def copy_hooks(installer: Installer) -> None:
 
 def copy_rules_and_skills(with_rules: bool, lang: str,
                           installer: Installer,
-                          with_skill: bool = True) -> None:
-    """Copy beads-workflow rule, project-discovery skill, and optional dev rules."""
+                          with_skills: bool = True) -> None:
+    """Copy beads-workflow rule, every skill, and optional dev rules."""
     print("\n[4/6] Copying rules and skills...")
 
     # Determine source directory based on language
@@ -1420,13 +1420,44 @@ def copy_rules_and_skills(with_rules: bool, lang: str,
                 installer.install(f"rules/{src.name}", read_verbatim(src),
                                   note=note)
 
-    if with_skill:
-        copy_skill(installer)
+    if with_skills:
+        copy_skills(installer)
     print("  DONE")
 
 
-def copy_skill(installer: Installer) -> None:
-    """Copy the project-discovery skill, one file at a time.
+def _in_a_skill(rel: Path) -> bool:
+    """A file inside a skill directory that someone wrote for the skill.
+
+    `rel` is relative to templates/skills, so a single part is a loose file
+    beside the skills. Hidden entries (.DS_Store, .git) and Python's bytecode
+    cache land in a directory without anyone writing them there; a .DS_Store is
+    binary, and reading it as text stopped the whole run.
+    """
+    return len(rel.parts) > 1 and all(
+        not part.startswith(".") and part != "__pycache__" for part in rel.parts
+    )
+
+
+def shipped_skill_files() -> list:
+    """Every file of every skill we ship, as a key under .claude/.
+
+    A skill is a directory under templates/skills, because that is what the
+    plugin loads; a loose file beside the directories is no skill. The
+    installer once named one skill, so a second would have reached plugin
+    users and never an npx install.
+    """
+    skills_root = TEMPLATES_DIR / "skills"
+    if not skills_root.is_dir():
+        return []
+    return [
+        "skills/" + p.relative_to(skills_root).as_posix()
+        for p in sorted(skills_root.rglob("*"))
+        if p.is_file() and _in_a_skill(p.relative_to(skills_root))
+    ]
+
+
+def copy_skills(installer: Installer) -> None:
+    """Copy every skill, one file at a time.
 
     It used to be rmtree + copytree, on the grounds that the directory is our
     code. It is not: SKILL.md is a prompt people tune the way they tune a rule,
@@ -1434,18 +1465,14 @@ def copy_skill(installer: Installer) -> None:
     no flag, no question. So each file we ship goes through the same question a
     rule does, and a file we do not ship is left where its owner put it.
     """
-    skill_src = TEMPLATES_DIR / "skills" / "project-discovery"
-    if not skill_src.exists():
-        return
-    for src in sorted(p for p in skill_src.rglob("*") if p.is_file()):
-        rel = str(src.relative_to(skill_src)).replace("\\", "/")
-        installer.install(f"skills/project-discovery/{rel}", read_verbatim(src))
+    for rel_key in shipped_skill_files():
+        installer.install(rel_key, read_verbatim(TEMPLATES_DIR / rel_key))
 
 
 # ============================================================================
 # Handing the executable half over to the plugin
 # ============================================================================
-# Installed as a plugin, Claude Code loads the hooks, agents and skill itself.
+# Installed as a plugin, Claude Code loads the hooks, agents and skills itself.
 # A copy of them left in the project does not sit quietly beside the plugin:
 # hooks merge from every source, so each one fires twice.
 
@@ -1462,13 +1489,7 @@ def plugin_provided_relpaths() -> list:
             for p in sorted((TEMPLATES_DIR / "hooks").glob("*.cjs"))]
     rels += [f".claude/agents/{p.name}"
              for p in sorted((TEMPLATES_DIR / "agents").glob("*.md"))]
-    skill_src = TEMPLATES_DIR / "skills" / "project-discovery"
-    if skill_src.exists():
-        rels += [
-            ".claude/skills/project-discovery/"
-            + str(p.relative_to(skill_src)).replace("\\", "/")
-            for p in sorted(skill_src.rglob("*")) if p.is_file()
-        ]
+    rels += [f".claude/{rel_key}" for rel_key in shipped_skill_files()]
     return rels
 
 
@@ -2056,15 +2077,15 @@ def bootstrap_project(
     if not project_only and plugin_active_for(project_dir):
         project_only = True
         print("\nClaude Protocol is installed here as a plugin, and it carries the")
-        print("hooks, agents and skill. Installing only what it cannot: beads,")
+        print("hooks, agents and skills. Installing only what it cannot: beads,")
         print("rules and CLAUDE.md.")
 
-    # Installed as a plugin, Claude Code loads the hooks, agents and skill
+    # Installed as a plugin, Claude Code loads the hooks, agents and skills
     # itself; a copy of them in the project makes every hook fire twice.
     if not project_only:
         copy_agents(resolved_name, installer)
         copy_hooks(installer)
-    copy_rules_and_skills(with_rules, lang, installer, with_skill=not project_only)
+    copy_rules_and_skills(with_rules, lang, installer, with_skills=not project_only)
     copy_settings_and_claude_md(resolved_name, installer,
                                 with_settings=not project_only, lang=lang)
     setup_gitignore(installer)
@@ -2196,7 +2217,7 @@ def main():
     parser.add_argument("--upgrade", action="store_true", help="Run init flow then cleanup obsolete items (uses existing manifest)")
     parser.add_argument("--dry-run", action="store_true", help="Print plan without writing anything")
     parser.add_argument("--install-beads", dest="install_bd", action="store_true", help="Install the beads CLI without asking (default: ask, and install nothing when nobody can answer)")
-    parser.add_argument("--project-only", dest="project_only", action="store_true", help="Install only what a plugin cannot carry: beads, rules, CLAUDE.md. Hooks, agents and the skill come from the plugin, and copies of them already in the project are removed")
+    parser.add_argument("--project-only", dest="project_only", action="store_true", help="Install only what a plugin cannot carry: beads, rules, CLAUDE.md. Hooks, agents and skills come from the plugin, and copies of them already in the project are removed")
     parser.add_argument("--all", dest="all_parent", default=None, metavar="PARENT_DIR", help="Batch upgrade: iterate direct subdirs of PARENT_DIR that contain .beads/. Implies --upgrade.")
     args = parser.parse_args()
 
