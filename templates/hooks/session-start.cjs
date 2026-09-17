@@ -161,14 +161,22 @@ function warnNobodyAnswered(output) {
   output.push('');
 }
 
-/** Worktrees under .worktrees/bd-*, each with its branch, tip and lock. */
+/**
+ * Worktrees under .worktrees/bd-*, each with its branch, tip, lock, and
+ * whether any other worktree lies inside it — `bd worktree create` run from
+ * within a worktree nests the new one there.
+ */
 function listBeadWorktrees(repoRoot) {
   const list = execCommand('git', ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
   if (!list) return [];
-  return list.split(/\r?\n\r?\n/).map(parseWorktreeEntry).filter(Boolean);
+  const entries = list.split(/\r?\n\r?\n/).map(parseWorktreeEntry);
+  return entries.filter(entry => entry.ours).map(entry => ({
+    ...entry,
+    holdsWorktree: entries.some(other => other.path && liesInside(other.path, entry.path)),
+  }));
 }
 
-/** One `git worktree list --porcelain` entry, or null if it is not ours. */
+/** One `git worktree list --porcelain` entry; `ours` marks a bd-* worktree. */
 function parseWorktreeEntry(entry) {
   const lines = entry.split(/\r?\n/);
   const field = (name) => {
@@ -178,16 +186,24 @@ function parseWorktreeEntry(entry) {
   const where = field('worktree');
   const ref = field('branch');
   // A detached worktree has no branch that could have been merged.
-  if (!where.includes('.worktrees/bd-') || !ref.startsWith('refs/heads/')) return null;
-
-  const branch = ref.slice('refs/heads/'.length);
+  const branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : '';
   return {
     path: where,
+    ours: where.includes('.worktrees/bd-') && branch !== '',
     branch,
     head: field('HEAD'),
     locked: lines.some(line => line === 'locked' || line.startsWith('locked ')),
     beadGuess: branch.startsWith('bd-') ? branch.slice('bd-'.length) : '',
   };
+}
+
+/** True when path `inner` lies somewhere below path `outer`. */
+function liesInside(inner, outer) {
+  const tidy = (p) => {
+    const slashes = p.replace(/\\/g, '/').replace(/\/+$/, '');
+    return process.platform === 'win32' ? slashes.toLowerCase() : slashes;
+  };
+  return tidy(inner).startsWith(`${tidy(outer)}/`);
 }
 
 /**
@@ -375,6 +391,13 @@ function beadLines(bead) {
 function cleanupLines(worktree) {
   if (worktree.locked) {
     return [`   It is locked (git worktree lock), so it is left alone: ${worktree.path}`];
+  }
+  // .worktrees/ is ignored, so the one inside never shows in this one's status.
+  if (worktree.holdsWorktree) {
+    return [
+      '   Not suggesting removal: another worktree lives inside it and would go',
+      `   with it. Look at it by hand: ${worktree.path}`,
+    ];
   }
   if (!worktreeIsClean(worktree.path)) {
     return [

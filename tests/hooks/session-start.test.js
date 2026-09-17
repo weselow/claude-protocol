@@ -472,6 +472,18 @@ describe('session-start on cleaning up a merged worktree', SLOW, () => {
     expectNoRemoval(report(repo));
   });
 
+  // `bd worktree create` run inside a worktree nests the new one there, and
+  // .worktrees/ is ignored, so the outer one still reads clean.
+  it('does not suggest removing a worktree that holds another worktree', () => {
+    const repo = repoWithWorktree();
+    const inner = addWorktree(repo.worktree, 'bd-y', 'ahead');
+    fs.writeFileSync(path.join(inner, 'notes.txt'), 'unsaved');
+    const out = report(repo);
+
+    expectNoRemoval(out);
+    expect(out).toContain('another worktree');
+  });
+
   // A locked worktree refuses removal, and && would skip the prune.
   it('says a locked worktree is locked instead of a command that fails', () => {
     const repo = repoWithWorktree();
