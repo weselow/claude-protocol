@@ -41,6 +41,18 @@ jobs:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
 
+      # The Windows runner sets TEMP to the 8.3 short form
+      # C:\Users\RUNNER~1\AppData\Local\Temp. git reports the long form of the
+      # same directory, fs.realpathSync does not expand short names, and a test
+      # comparing the two fails. A developer's TEMP is the long form, and so is
+      # the job's own temp directory.
+      - name: Use a temp directory without 8.3 short names
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
