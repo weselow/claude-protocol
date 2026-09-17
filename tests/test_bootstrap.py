@@ -3446,11 +3446,35 @@ class TestEverySkillIsInstalled:
         skipped = _copy_rules(two_skills, manifest,
                               prompt=bootstrap.ConflictPrompt(interactive=True))
 
-        assert asked, "a file the user edited was replaced without asking"
+        assert asked, ("the edited SKILL.md of the second skill never reached "
+                       "the question")
         assert rel_key in skipped
         assert read_verbatim(dest) == MINE
         assert read_verbatim(dest.parent / "our-notes.md") == "notes I keep here\n", \
             "a file we never shipped was touched"
+
+    def test_hidden_files_and_bytecode_are_not_skill_files(self, two_skills,
+                                                           monkeypatch):
+        """A .DS_Store is binary, and reading it as text took the whole run
+        down with a UnicodeDecodeError. Nobody writes these for a skill."""
+        junk = ["skills/other-skill/.DS_Store",
+                "skills/other-skill/__pycache__/helper.cpython-314.pyc",
+                "skills/other-skill/.cache/notes.md",
+                "skills/.hidden-skill/SKILL.md"]
+        for rel_key in junk:
+            path = bootstrap.TEMPLATES_DIR / rel_key
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"\x00\x00\x00\x01Bud1\xff\xfe\x80")
+
+        assert _run_bootstrap(two_skills, monkeypatch) == 0
+
+        rels = bootstrap.plugin_provided_relpaths()
+        for rel_key in junk:
+            assert not (two_skills / ".claude" / rel_key).exists(), \
+                f"{rel_key} was installed"
+            assert f".claude/{rel_key}" not in rels, f"{rel_key} is handed over"
+        assert (two_skills / ".claude" / "skills" / "other-skill" / "SKILL.md").exists(), \
+            "the second skill itself was not installed"
 
 
 class TestEverySkillIsHandedOver:

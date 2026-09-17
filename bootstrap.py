@@ -1425,6 +1425,19 @@ def copy_rules_and_skills(with_rules: bool, lang: str,
     print("  DONE")
 
 
+def _in_a_skill(rel: Path) -> bool:
+    """A file inside a skill directory that someone wrote for the skill.
+
+    `rel` is relative to templates/skills, so a single part is a loose file
+    beside the skills. Hidden entries (.DS_Store, .git) and Python's bytecode
+    cache land in a directory without anyone writing them there; a .DS_Store is
+    binary, and reading it as text stopped the whole run.
+    """
+    return len(rel.parts) > 1 and all(
+        not part.startswith(".") and part != "__pycache__" for part in rel.parts
+    )
+
+
 def shipped_skill_files() -> list:
     """Every file of every skill we ship, as a key under .claude/.
 
@@ -1437,9 +1450,9 @@ def shipped_skill_files() -> list:
     if not skills_root.is_dir():
         return []
     return [
-        "skills/" + str(p.relative_to(skills_root)).replace("\\", "/")
-        for skill in sorted(d for d in skills_root.iterdir() if d.is_dir())
-        for p in sorted(skill.rglob("*")) if p.is_file()
+        "skills/" + p.relative_to(skills_root).as_posix()
+        for p in sorted(skills_root.rglob("*"))
+        if p.is_file() and _in_a_skill(p.relative_to(skills_root))
     ]
 
 
