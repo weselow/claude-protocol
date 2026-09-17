@@ -58,6 +58,23 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+- **Security fix: arguments passed to `.cmd` wrappers on Windows** — bd and gh
+  installed through npm are `.cmd` wrappers, and the hooks can run those only
+  through `cmd.exe`. The way arguments were quoted on that path did not hold
+  for every argument, so part of one could be read by `cmd.exe` as more than
+  an argument. Affected: v3.9.2 and earlier, on Windows, where `bd` or `gh` is
+  such a wrapper; `bd.exe`, `gh.exe`, Linux and macOS were not. An argument
+  holding a character known to get past that quoting is now not sent at all
+  — that call gets no answer, and the refusal is written to
+  `beads_orchestrator_errors.log` — and `cmd.exe` runs with delayed variable
+  expansion switched off. The hooks never need such arguments. On Windows the
+  hooks also no longer start a program of the same name from the project
+  directory in place of `git`, `bd`, `gh`, `cmd.exe` or `taskkill`: Claude Code
+  already prevented that, other ways of running the hooks did not. Also, a
+  command that runs past its time limit is now stopped together with the
+  program behind the wrapper — until now only `cmd.exe` was, and a hanging
+  `bd` left five processes running after every session start. Waiting for a
+  wrapper call now costs about 25 ms more.
 - **`npx` installs every skill the plugin carries** — the installer named
   `project-discovery` and nothing else, while the plugin loads every directory
   under `templates/skills`. A second skill would have reached plugin users

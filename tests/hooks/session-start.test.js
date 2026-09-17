@@ -548,6 +548,29 @@ describe('session-start on the bead behind a merged worktree', SLOW, () => {
     expect(out).toContain('look the bead up');
   });
 
+  // A branch name may hold what no bead id does. bd is not asked about it —
+  // and the other worktrees keep their answer, which on Windows they lost:
+  // a call through cmd.exe with such an argument is not made at all.
+  it('asks bd only about names a bead id can have', () => {
+    const repo = repoWithWorktree({ branch: 'bd-app-7' });
+    addWorktree(repo.dir, 'bd-app-8%x', 'merged');
+    const tools = fakeTools({ beads: [{ id: 'app-7', status: 'in_progress' }] });
+    const out = report(repo, tools);
+
+    expect(out).toContain('app-7 is still in_progress');
+    expect(out).toContain('branch bd-app-8%x was merged');
+    expect(tools.bdCalls()).toContain('show');
+    expect(tools.bdCalls()).not.toContain('app-8');
+  });
+
+  // bd takes its prefix from the directory name, which need not be English.
+  it('asks about an id in any alphabet', () => {
+    const repo = repoWithWorktree({ branch: 'bd-проект-7' });
+    const out = withBeads(repo, [{ id: 'проект-7', status: 'open' }]);
+
+    expect(out).toContain('проект-7 is still open');
+  });
+
   it('names no bead when bd does not answer', () => {
     const repo = repoWithWorktree();
     const out = withBeads(repo, []);

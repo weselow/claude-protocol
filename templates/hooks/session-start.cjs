@@ -19,8 +19,13 @@ const {
   leftoverProjectHooks,
 } = require('./hook-utils.cjs');
 
-// Up here, not with the task-list functions: the hook body below starts
+// Up here, not with the functions using them: the hook body below starts
 // running at once, before any constant further down exists.
+//
+// What a bead id is made of: bash-guard's letters, digits, '.', '_' and '-',
+// except that a letter may be of any alphabet — bd takes its prefix from the
+// directory name.
+const BEAD_ID = /^[\p{L}\p{N}._-]+$/u;
 //
 // A cold embedded dolt takes 5-20 s a call (reported from another project),
 // and execCommand's 10 s default dropped a list without a word. The output
@@ -374,9 +379,12 @@ function resolveMainBranch(repoRoot) {
  * carry a prefix, bd-219 is not the id of anything. And `bd show` answers a
  * partial id with whatever bead it matches, so a bead counts only when its id
  * comes back unchanged.
+ *
+ * A branch name may also hold what no id does. Such a guess is not asked
+ * about, so one odd name does not cost the others their answer.
  */
 function confirmedBeads(guesses) {
-  const ids = guesses.filter(Boolean);
+  const ids = guesses.filter(guess => BEAD_ID.test(guess));
   const beads = new Map();
   if (ids.length === 0) return beads;
 

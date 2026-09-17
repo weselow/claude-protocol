@@ -136,6 +136,28 @@ function injectText(text) {
 // remember the answer instead of paying for a doomed spawn every time.
 const _needsCmdExe = new Set();
 
+// The characters known to get past quoteForCmdExe. An argument holding one is
+// not sent at all. bd and gh never need them. git's format strings do
+// need '%', so a git that is itself a .cmd/.bat wrapper (depot_tools puts one
+// first on PATH) gets null for those calls; a real git.exe is started
+// directly and never comes this way.
+const NOT_FOR_CMD_EXE = /["%!\r\n\0]/;
+
+// Windows looks for a program named without a path in the current directory
+// first — the project root here — unless this variable is set. Claude Code
+// sets it; a hook started any other way may not have it.
+const NO_CWD_SEARCH = 'NoDefaultCurrentDirectoryInExePath';
+
+// What settle answers for a command that was not sent to cmd.exe.
+const REFUSED = Object.freeze({ error: new Error('not safe to pass through cmd.exe'), stdout: null });
+
+// taskkill answers in about 150 ms; this is for a machine under load.
+const TASKKILL_TIMEOUT_MS = 3000;
+
+// How long settleSync waits for its worker beyond the command's own limit:
+// long enough for the worker to start and for taskkill to finish.
+const WORKER_GRACE_MS = TASKKILL_TIMEOUT_MS + 2000;
+
 /**
  * Quote one argument for `cmd.exe`. Letting Node do it is not enough: Node
  * quotes an argument only when it contains whitespace, so `x&&whoami` arrives
@@ -144,35 +166,70 @@ const _needsCmdExe = new Set();
  * `&`, `|`, `<`, `>` and `^` as ordinary characters, and the callee's C
  * runtime strips the quotes again, so the program sees what the caller wrote.
  *
- * `%VAR%` is the one thing quoting cannot stop — cmd.exe expands it before it
- * looks at quotes. That substitutes an environment value into an argument; it
- * cannot start a command, and this path only ever runs .cmd wrappers.
+ * That holds only for an argument free of NOT_FOR_CMD_EXE, and only with
+ * delayed expansion off — viaCmdExe sees to both.
  */
 function quoteForCmdExe(arg) {
-  // A backslash is only special in front of a quote, so double those runs —
-  // the trailing run included, since the closing quote follows it.
-  const escaped = String(arg).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, '$1$1');
-  return `"${escaped}"`;
+  // With no quote inside, a backslash matters only in front of the closing
+  // quote, so the trailing run is doubled.
+  return `"${String(arg).replace(/(\\*)$/, '$1$1')}"`;
 }
 
 /**
  * The cmd.exe call that runs a command — the only way to reach a .cmd/.bat
- * wrapper — as [file, args, options].
+ * wrapper — as [file, args, options]; or null, logged, when an argument holds
+ * a character cmd.exe cannot carry.
  */
 function viaCmdExe(cmd, args, options) {
-  // `/s` makes cmd.exe strip exactly the outermost pair of quotes and take the
-  // rest literally, which is why the whole command goes inside one more pair.
+  const unsafe = [cmd, ...args].map(String).find(arg => NOT_FOR_CMD_EXE.test(arg));
+  if (unsafe !== undefined) {
+    logError('hook-utils', `not run through cmd.exe: ${JSON.stringify(String(cmd))} was given `
+      + `an argument holding ", %, !, CR, LF or NUL: ${JSON.stringify(unsafe).slice(0, 200)}`);
+    return null;
+  }
+  // `/d` skips AutoRun commands, and `/v:off` switches off delayed expansion,
+  // which the registry can switch on for every cmd.exe. `/s` makes cmd.exe
+  // strip exactly the outermost pair of quotes and take the rest literally,
+  // which is why the whole command goes inside one more pair.
   // windowsVerbatimArguments stops Node from re-quoting what is already quoted.
   const line = [cmd, ...args].map(quoteForCmdExe).join(' ');
-  return ['cmd.exe', ['/d', '/s', '/c', `"${line}"`], {
+  return [system32('cmd.exe'), ['/d', '/v:off', '/s', '/c', `"${line}"`], {
     ...options,
     windowsVerbatimArguments: true,
   }];
 }
 
-/** Run a command through cmd.exe and wait for it. */
-function runViaCmdExe(cmd, args, options) {
-  return execFileSync(...viaCmdExe(cmd, args, options));
+/** A program of Windows itself, by full path: never one found by its name. */
+function system32(name) {
+  return path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', name);
+}
+
+/**
+ * The environment for a command on Windows: `env`, or this process's when
+ * none is given, with NO_CWD_SEARCH set. Node reads the variable from this
+ * process's own environment when it looks a name up (measured: the child's
+ * does not count), cmd.exe from the one it is given — so it goes into both.
+ */
+function withoutCwdSearch(env) {
+  process.env[NO_CWD_SEARCH] = '1';
+  const result = {};
+  for (const [key, value] of Object.entries(env || process.env)) {
+    if (key.toUpperCase() !== NO_CWD_SEARCH.toUpperCase()) result[key] = value;
+  }
+  result[NO_CWD_SEARCH] = '1';
+  return result;
+}
+
+/** Run a command through cmd.exe: a promise of settle's { error, stdout }. */
+function settleViaCmdExe(cmd, args, options) {
+  const call = viaCmdExe(cmd, args, options);
+  return call ? settle(...call) : Promise.resolve(REFUSED);
+}
+
+/** settleViaCmdExe, waited for. */
+function settleViaCmdExeSync(cmd, args, options) {
+  const call = viaCmdExe(cmd, args, options);
+  return call ? settleSync(call) : REFUSED;
 }
 
 /**
@@ -188,7 +245,7 @@ function spawnRefused(err) {
 
 /** The options every external command runs with (see execCommand). */
 function commandOptions(opts) {
-  return {
+  const options = {
     encoding: 'utf8',
     timeout: 10000,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -200,6 +257,8 @@ function commandOptions(opts) {
     cwd: getProjectDir(),
     ...opts,
   };
+  if (process.platform === 'win32') options.env = withoutCwdSearch(options.env);
+  return options;
 }
 
 /** JSON.parse that answers null instead of throwing, and null for null. */
@@ -226,7 +285,10 @@ function parseJSONOrNull(raw) {
  * Windows still needs a shell for one case: `.cmd`/`.bat` wrappers (bd and gh
  * installed through npm) cannot be spawned directly at all — Node refuses with
  * EINVAL for a full path and ENOENT for a bare name. Those go through
- * `cmd.exe /d /s /c` with arguments quoted by quoteForCmdExe below.
+ * `cmd.exe` with arguments quoted by quoteForCmdExe above; an argument with
+ * a character known to get past that quoting gets null without being sent.
+ * On Windows a program is never looked for in the project directory first
+ * (see withoutCwdSearch).
  *
  * @param {string}   cmd   - Executable name (e.g. 'git', 'bd', 'gh')
  * @param {string[]} args  - Argument array
@@ -235,22 +297,15 @@ function parseJSONOrNull(raw) {
  */
 function execCommand(cmd, args, opts) {
   const options = commandOptions(opts);
+  if (_needsCmdExe.has(cmd)) return settleViaCmdExeSync(cmd, args, options).stdout;
   try {
-    const direct = _needsCmdExe.has(cmd)
-      ? runViaCmdExe(cmd, args, options)
-      : execFileSync(cmd, args, options);
-    return direct.trim();
+    return execFileSync(cmd, args, options).trim();
   } catch (err) {
-    // Already through cmd.exe: there is nothing left to retry with.
-    if (_needsCmdExe.has(cmd) || !spawnRefused(err)) return null;
-    try {
-      const viaShim = runViaCmdExe(cmd, args, options);
-      _needsCmdExe.add(cmd);
-      return viaShim.trim();
-    } catch {
-      return null;
-    }
+    if (!spawnRefused(err)) return null;
   }
+  const viaShim = settleViaCmdExeSync(cmd, args, options);
+  if (!viaShim.error) _needsCmdExe.add(cmd);
+  return viaShim.stdout;
 }
 
 /**
@@ -267,13 +322,13 @@ function execCommandJSON(cmd, args, opts) {
  */
 async function execCommandAsync(cmd, args, opts) {
   const options = commandOptions(opts);
-  if (_needsCmdExe.has(cmd)) return (await settle(...viaCmdExe(cmd, args, options))).stdout;
+  if (_needsCmdExe.has(cmd)) return (await settleViaCmdExe(cmd, args, options)).stdout;
 
   const direct = await settle(cmd, args, options);
   // Another call may have learned meanwhile that this is a wrapper; the
   // retry is right either way.
   if (!direct.error || !spawnRefused(direct.error)) return direct.stdout;
-  const viaShim = await settle(...viaCmdExe(cmd, args, options));
+  const viaShim = await settleViaCmdExe(cmd, args, options);
   if (!viaShim.error) _needsCmdExe.add(cmd);
   return viaShim.stdout;
 }
@@ -323,6 +378,60 @@ function settle(file, args, options) {
 }
 
 /**
+ * settle, waited for: [file, args, options] run on a worker thread while this
+ * thread blocks, with the same { error, stdout } as the answer.
+ *
+ * execFileSync would be simpler, but at its time limit it stops only the
+ * process it started. For a .cmd wrapper that is cmd.exe, and the program
+ * behind it ran on — a hanging bd left one more process behind at every call.
+ * settle stops the whole tree, and a worker is how to wait for it without an
+ * event loop. That costs about 25 ms a call, next to the 200 ms a call
+ * through cmd.exe takes for bd anyway.
+ */
+function settleSync([file, args, options]) {
+  const { Worker, MessageChannel, receiveMessageOnPort } = require('worker_threads');
+  const done = new Int32Array(new SharedArrayBuffer(4));
+  const { port1, port2 } = new MessageChannel();
+  try {
+    new Worker(SETTLE_IN_WORKER, {
+      eval: true,
+      workerData: { utils: __filename, call: [file, args, options], done, port: port2 },
+      transferList: [port2],
+    }).unref();
+    // The worker keeps the time limit itself; this wait only has to outlast it.
+    Atomics.wait(done, 0, 0, options.timeout > 0 ? options.timeout + WORKER_GRACE_MS : undefined);
+    const reply = receiveMessageOnPort(port1);
+    if (!reply) throw new Error('the worker never answered');
+    const { broken, failed, reason, stdout } = reply.message;
+    if (broken) throw new Error(`the worker could not run it: ${reason}`);
+    return failed ? { error: new Error(reason), stdout: null } : { error: null, stdout };
+  } catch (err) {
+    // No worker to be had, options it cannot be handed, no answer from it,
+    // or a worker that could not run the command.
+    logError('hook-utils', `waiting for ${file} on a worker thread failed: ${err.message}`);
+    return { error: err, stdout: null };
+  } finally {
+    port1.close();
+  }
+}
+
+// The worker's side of settleSync. It answers whatever happens, so the wait
+// ends as soon as the command does: `failed` when the command failed,
+// `broken` when the worker could not run it at all.
+const SETTLE_IN_WORKER = `
+const { workerData: { utils, call, done, port } } = require('worker_threads');
+Promise.resolve()
+  .then(() => require(utils).settle(...call))
+  .then(({ error, stdout }) => ({ failed: Boolean(error), reason: error ? String(error.message) : '', stdout }))
+  .catch((err) => ({ broken: true, reason: String((err && err.message) || err) }))
+  .then((reply) => {
+    port.postMessage(reply);
+    Atomics.store(done, 0, 1);
+    Atomics.notify(done, 0);
+  });
+`;
+
+/**
  * What execFile does at its own time limit: close the output pipes, then stop
  * the program. Closing them first matters — a program that runs on as a
  * grandchild (behind a .cmd wrapper, or behind npm's bd launcher) keeps them
@@ -331,7 +440,31 @@ function settle(file, args, options) {
 function stopChild(child) {
   child.stdout.destroy();
   child.stderr.destroy();
+  if (process.platform === 'win32') stopTree(child);
   child.kill();
+}
+
+/**
+ * Stop a Windows process together with everything it started. Stopping the
+ * process alone leaves its children running: the program behind a .cmd
+ * wrapper is cmd.exe's child. taskkill /T finds the children through their
+ * parent, so it runs before child.kill(), while the parent is still there.
+ * It is waited for: Node stops its own children when it exits, and a hook
+ * may exit right after a time limit — taskkill included.
+ */
+function stopTree(child) {
+  // Once the process has exited, its pid may already name another one.
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    execFileSync(system32('taskkill.exe'), ['/T', '/F', '/PID', String(child.pid)], {
+      stdio: 'ignore', timeout: TASKKILL_TIMEOUT_MS, windowsHide: true,
+    });
+  } catch (err) {
+    // 128 is "not found": the program finished just as its time ran out.
+    if (err.status === 128) return;
+    logError('hook-utils', `taskkill could not stop the process tree of ${child.spawnfile} `
+      + `(pid ${child.pid}): ${err.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -811,6 +944,8 @@ module.exports = {
   execCommandJSON,
   execCommandAsync,
   execCommandJSONAsync,
+  // For settleSync's worker thread, which loads this file on its own.
+  settle,
   getRepoRoot,
   getCurrentBranch,
   getProjectDir,

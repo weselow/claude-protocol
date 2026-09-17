@@ -259,9 +259,22 @@ describe('splitCommandSegments', () => {
 
 const { spawnSync } = require('child_process');
 
+// Every directory made through tempDir is removed once the file is done.
+const madeForCmdExe = [];
+function tempDir(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  madeForCmdExe.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const dir of madeForCmdExe) {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
 /** A throwaway script that prints each argv entry on its own line. */
 function makeArgvPrinter() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cp-argv-'));
+  const dir = tempDir('cp-argv-');
   const file = path.join(dir, 'argv-print.js');
   fs.writeFileSync(file, 'process.argv.slice(2).forEach((a, i) => console.log(i + "=<" + a + ">"));\n');
   return file;
@@ -273,6 +286,98 @@ function lines(out) {
 }
 
 const onWindows = process.platform === 'win32';
+const ONLY_WINDOWS = 'cmd.exe and .cmd wrappers exist only on Windows';
+
+// Arguments the cmd.exe path refuses, one per character it refuses. The tests
+// below check that none of them reaches the wrapper's directory in any form.
+const REFUSED_ARGS = {
+  'a double quote': 'x" & type nul > MARKER & "',
+  'a percent sign': 'x%CMDCMDLINE:~-1% & type nul > MARKER & %CMDCMDLINE:~-1%',
+  'an exclamation mark': 'x!CMDCMDLINE:~-1! & type nul > MARKER & !CMDCMDLINE:~-1!',
+  'a line feed': 'x\n& type nul > MARKER',
+  'a carriage return': 'x\r& type nul > MARKER',
+  'a NUL': 'x\0 & type nul > MARKER',
+};
+
+/**
+ * A .cmd wrapper `name` in a fresh directory (whose name holds a space) that
+ * forwards its arguments to an argv printer, and the options that run it from
+ * that directory. `strayFile` is the file the refused arguments name; the
+ * error log goes to that directory too.
+ */
+function cmdWrapper(name) {
+  const dir = path.join(tempDir('cp-cmd-'), 'with space');
+  fs.mkdirSync(dir);
+  const printer = path.join(dir, 'argv-print.js');
+  fs.writeFileSync(printer, 'process.argv.slice(2).forEach((a, i) => console.log(i + "=<" + a + ">"));\n');
+  const wrapper = path.join(dir, `${name}.cmd`);
+  fs.writeFileSync(wrapper, `@echo off\r\n"${process.execPath}" "${printer}" %*\r\n`);
+  return {
+    dir,
+    wrapper,
+    strayFile: path.join(dir, 'MARKER'),
+    log: () => {
+      const file = path.join(dir, 'beads_orchestrator_errors.log');
+      return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    },
+    opts: { cwd: dir, env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH } },
+  };
+}
+
+/** Run `fn` with the error log sent to `dir`; `fn` may be async. */
+async function loggingTo(dir, fn) {
+  const saved = process.env.CLAUDE_PROJECT_DIR;
+  process.env.CLAUDE_PROJECT_DIR = dir;
+  try {
+    return await fn();
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = saved;
+  }
+}
+
+/**
+ * A .cmd wrapper `name` whose program writes its pid and then sleeps far
+ * longer than any test waits — a hanging bd as seen from here: cmd.exe with
+ * the program as its child. `pid()` is the program's pid, once written.
+ */
+function hangingWrapper(name) {
+  const dir = tempDir('cp-hang-');
+  const pidFile = path.join(dir, 'pid');
+  const sleeper = path.join(dir, 'sleep.js');
+  fs.writeFileSync(sleeper, `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n`
+    + 'setTimeout(() => {}, 60000);\n');
+  fs.writeFileSync(path.join(dir, `${name}.cmd`), `@"${process.execPath}" "${sleeper}"\r\n`);
+  return {
+    dir,
+    opts: { timeout: 3000, env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH } },
+    pid: () => (fs.existsSync(pidFile) ? Number(fs.readFileSync(pidFile, 'utf8')) : null),
+  };
+}
+
+function isRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Wait up to `ms` for the process to be gone; true when it is. */
+async function goneWithin(pid, ms) {
+  const until = Date.now() + ms;
+  while (isRunning(pid)) {
+    if (Date.now() > until) return false;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return true;
+}
+
+/** Stop a process a failed test may have left behind. */
+function reap(pid) {
+  if (pid && isRunning(pid)) spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)]);
+}
 
 describe('execCommand argument passing', () => {
   // process.execPath is "C:\Program Files\nodejs\node.exe" on Windows, so this
@@ -297,7 +402,7 @@ describe('execCommand argument passing', () => {
   });
 
   it('finds a repository whose path contains a space', () => {
-    const repo = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-space-')), 'dir with space');
+    const repo = path.join(tempDir('cp-space-'), 'dir with space');
     fs.mkdirSync(repo, { recursive: true });
     expect(execCommand('git', ['init', '-q', repo])).not.toBeNull();
 
@@ -314,7 +419,7 @@ describe('execCommand argument passing', () => {
 
   /** A .cmd wrapper on PATH that forwards its arguments to the argv printer. */
   function wrapperOnPath() {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cp-wrapper-'));
+    const dir = tempDir('cp-wrapper-');
     fs.writeFileSync(path.join(dir, 'cp-printer.cmd'),
       `@echo off\r\n"${process.execPath}" "${printer}" %*\r\n`);
     return { env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH } };
@@ -323,24 +428,34 @@ describe('execCommand argument passing', () => {
   // .cmd/.bat wrappers cannot be spawned directly at all (Node refuses with
   // EINVAL/ENOENT), so they are the one case that still goes through cmd.exe —
   // and therefore the one case where a shell parser sees the arguments.
-  // Windows-only by nature.
-  (onWindows ? it : it.skip)('runs a .cmd wrapper and keeps its arguments intact', () => {
+  it('runs a .cmd wrapper and keeps its arguments intact', ({ skip }) => {
+    skip(!onWindows, ONLY_WINDOWS);
     const out = execCommand(
       'cp-printer',
-      ['two words', 'a^b', 'C:\\Users\\R&D\\project', 'say "hi"'],
+      ['two words', 'a^b', 'C:\\Users\\R&D\\project', 'a|b>c', 'C:\\dir\\', ''],
       wrapperOnPath(),
     );
     expect(lines(out)).toEqual([
-      '0=<two words>', '1=<a^b>', '2=<C:\\Users\\R&D\\project>', '3=<say "hi">',
+      '0=<two words>', '1=<a^b>', '2=<C:\\Users\\R&D\\project>', '3=<a|b>c>', '4=<C:\\dir\\>', '5=<>',
     ]);
+  });
+
+  // A full path is refused with EINVAL rather than ENOENT; the space in it
+  // must survive cmd.exe as well.
+  it('runs a .cmd wrapper given by a full path with a space in it', ({ skip }) => {
+    skip(!onWindows, ONLY_WINDOWS);
+    const { wrapper } = cmdWrapper('cp-full-path');
+
+    expect(lines(execCommand(wrapper, ['one', 'two words']))).toEqual(['0=<one>', '1=<two words>']);
   });
 
   // Node quotes an argument only when it contains whitespace, so a
   // metacharacter with no spaces around it reaches cmd.exe bare — `x&&echo.>f`
   // used to run as a second command and really created the file.
-  (onWindows ? it : it.skip)('does not let a .cmd wrapper argument run a second command', () => {
+  it('does not let a .cmd wrapper argument run a second command', ({ skip }) => {
+    skip(!onWindows, ONLY_WINDOWS);
     const opts = wrapperOnPath();
-    const mark = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-mark-')), 'INJECTED.txt');
+    const mark = path.join(tempDir('cp-mark-'), 'INJECTED.txt');
 
     const out = execCommand('cp-printer', [`x&&echo.>${mark}`, `y>${mark}`], opts);
 
@@ -348,11 +463,168 @@ describe('execCommand argument passing', () => {
     expect(lines(out)).toEqual([`0=<x&&echo.>${mark}>`, `1=<y>${mark}>`]);
   });
 
+  // Not sent at all — on the first call to a wrapper (the retry through
+  // cmd.exe) and on a later one alike.
+  Object.entries(REFUSED_ARGS).forEach(([what, payload], i) => {
+    it(`refuses to pass ${what} through cmd.exe, and says so in the error log`, async ({ skip }) => {
+      skip(!onWindows, ONLY_WINDOWS);
+      const name = `cp-refuse-sync-${i}`;
+      const tool = cmdWrapper(name);
+
+      await loggingTo(tool.dir, () => {
+        expect(execCommand(name, ['ok', payload], tool.opts)).toBeNull();
+        expect(lines(execCommand(name, ['ok'], tool.opts))).toEqual(['0=<ok>']);
+        expect(execCommand(name, [payload], tool.opts)).toBeNull();
+      });
+
+      expect(fs.existsSync(tool.strayFile)).toBe(false);
+      expect(tool.log()).toContain(name);
+      expect(tool.log()).toContain('cmd.exe');
+    });
+  });
+
+  // The wait for a wrapper runs on a worker thread, and a function cannot be
+  // handed to one. That is a failed call, not a thrown one.
+  it('gives null, and logs why, when the call cannot be handed to a worker', async ({ skip }) => {
+    skip(!onWindows, ONLY_WINDOWS);
+    const tool = cmdWrapper('cp-no-worker');
+    const opts = { ...tool.opts, notCloneable: () => {} };
+
+    const out = await loggingTo(tool.dir, () => execCommand('cp-no-worker', ['ok'], opts));
+
+    expect(out).toBeNull();
+    expect(tool.log()).toContain('worker thread failed');
+  });
+
+  // A worker that cannot run the command at all is a failure of its own, not
+  // a command that failed. Here it loads a copy of this file that lacks the
+  // export it needs.
+  it('gives null, and logs why, when the worker itself fails', async ({ skip }) => {
+    skip(!onWindows, ONLY_WINDOWS);
+    const tool = cmdWrapper('cp-broken-worker');
+    const source = fs.readFileSync(utilsPath, 'utf8');
+    const withoutSettle = source.replace(/^ {2}settle,\r?\n/m, '');
+    expect(withoutSettle).not.toBe(source);
+    const copy = path.join(tempDir('cp-broken-utils-'), 'hook-utils.cjs');
+    fs.writeFileSync(copy, withoutSettle);
+    const broken = require(copy);
+
+    const out = await loggingTo(tool.dir, () => broken.execCommand('cp-broken-worker', ['ok'], tool.opts));
+
+    expect(out).toBeNull();
+    expect(tool.log()).toContain('worker thread failed');
+  });
+
+  // A quote is fine where no shell is involved.
+  it('passes the same arguments to a program started directly', () => {
+    const payloads = Object.values(REFUSED_ARGS).filter(payload => !payload.includes('\0'));
+    expect(lines(execCommand(process.execPath, ['-e', 'console.log(JSON.stringify(process.argv.slice(1)))', ...payloads])))
+      .toEqual([JSON.stringify(payloads)]);
+  });
+
+  // execFileSync's own time limit stops cmd.exe and nothing else: the program
+  // behind the wrapper ran on, and every hanging bd left one more behind.
+  it('stops the program behind a .cmd wrapper when its time is up', async ({ skip }) => {
+    skip(!onWindows, ONLY_WINDOWS);
+    const tool = hangingWrapper('cp-hang-sync');
+    let pid = null;
+    try {
+      expect(await loggingTo(tool.dir, () => execCommand('cp-hang-sync', [], tool.opts))).toBeNull();
+      pid = tool.pid();
+      expect(pid, 'the program never started, so nothing was tested').not.toBeNull();
+      expect(await goneWithin(pid, 3000)).toBe(true);
+    } finally {
+      reap(pid || tool.pid());
+    }
+  });
+
   it('writes nothing to stderr — no DEP0190 deprecation noise', () => {
     const script = `require(${JSON.stringify(utilsPath)}).execCommand('git', ['--version']);`;
     const res = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
     expect(res.stderr).toBe('');
   });
+});
+
+// ---------------------------------------------------------------------------
+// Programs in the project directory
+// ---------------------------------------------------------------------------
+// Windows looks for a program named without a path in the current directory
+// first — Node and cmd.exe alike — unless NoDefaultCurrentDirectoryInExePath
+// is set. Claude Code sets it; a hook started any other way may lack it.
+
+describe('programs of the same name in the project directory', () => {
+  it('are never started in place of the real ones', async ({ skip }) => {
+    skip(!onWindows, ONLY_WINDOWS);
+    const project = tempDir('cp-planted-');
+    const started = path.join(project, 'started.log');
+    // Every node that starts notes its own file name — the copies below too.
+    const note = path.join(project, 'note.js');
+    fs.writeFileSync(note, `require('fs').appendFileSync(${JSON.stringify(started)}, `
+      + 'require(\'path\').basename(process.execPath) + \'\\n\');\n');
+    const planted = path.join(project, 'git.exe');
+    fs.copyFileSync(process.execPath, planted);
+    for (const name of ['bd.exe', 'gh.exe', 'cmd.exe', 'taskkill.exe']) {
+      fs.linkSync(planted, path.join(project, name));
+    }
+    fs.writeFileSync(path.join(project, 'cp-here-only.cmd'), `@echo cp-here-only.cmd>>"${started}"\r\n`);
+
+    // The real wrappers live elsewhere on PATH; one of them hangs.
+    const tools = tempDir('cp-planted-tools-');
+    const printer = path.join(tools, 'argv-print.js');
+    fs.writeFileSync(printer, 'process.argv.slice(2).forEach((a, i) => console.log(i + "=<" + a + ">"));\n');
+    fs.writeFileSync(path.join(tools, 'cp-elsewhere.cmd'), `@"${process.execPath}" "${printer}" %*\r\n`);
+    const pids = path.join(tools, 'pids');
+    const sleeper = path.join(tools, 'sleep.js');
+    fs.writeFileSync(sleeper, `require('fs').appendFileSync(${JSON.stringify(pids)}, process.pid + '\\n');\n`
+      + 'setTimeout(() => {}, 60000);\n');
+    fs.writeFileSync(path.join(tools, 'cp-hangs.cmd'), `@"${process.execPath}" "${sleeper}"\r\n`);
+
+    const env = Object.fromEntries(Object.entries(process.env)
+      .filter(([key]) => key.toUpperCase() !== 'NODEFAULTCURRENTDIRECTORYINEXEPATH'));
+    Object.assign(env, {
+      PATH: tools + path.delimiter + process.env.PATH,
+      CLAUDE_PROJECT_DIR: project,
+      // A backslash inside NODE_OPTIONS quotes is an escape.
+      NODE_OPTIONS: `--require "${note.replace(/\\/g, '/')}"`,
+    });
+    // `version`, not `--version`: a node answers that one before it loads
+    // note.js, and would pass unnoticed.
+    const script = `const u = require(${JSON.stringify(utilsPath)});
+(async () => {
+  const answers = {
+    git: u.execCommand('git', ['version']),
+    bd: u.execCommand('bd', ['version']),
+    gh: u.execCommand('gh', ['version']),
+    hereOnly: u.execCommand('cp-here-only', []),
+    elsewhere: u.execCommand('cp-elsewhere', ['ok']),
+    elsewhereAsync: await u.execCommandAsync('cp-elsewhere', ['ok']),
+    hangs: u.execCommand('cp-hangs', [], { timeout: 2000 }),
+    hangsAsync: await u.execCommandAsync('cp-hangs', [], { timeout: 2000 }),
+  };
+  process.stdout.write(JSON.stringify(answers));
+})();`;
+
+    const readPids = () => (fs.existsSync(pids)
+      ? fs.readFileSync(pids, 'utf8').split(/\s+/).filter(Boolean).map(Number) : []);
+    try {
+      const result = spawnSync(process.execPath, ['-e', script], {
+        cwd: project, env, encoding: 'utf8', timeout: 60000,
+      });
+      const answers = JSON.parse(result.stdout || '{}');
+      const names = fs.existsSync(started) ? fs.readFileSync(started, 'utf8').split(/\r?\n/) : [];
+
+      expect(names.filter(name => name && name !== 'node.exe'), result.stderr).toEqual([]);
+      expect(answers.git).toMatch(/^git version/);
+      expect(answers.hereOnly).toBeNull();
+      expect(answers.elsewhere).toBe('0=<ok>');
+      expect(answers.elsewhereAsync).toBe('0=<ok>');
+      expect([answers.hangs, answers.hangsAsync]).toEqual([null, null]);
+      expect(readPids(), 'the hanging wrapper never started').toHaveLength(2);
+      for (const pid of readPids()) expect(await goneWithin(pid, 3000)).toBe(true);
+    } finally {
+      readPids().forEach(reap);
+    }
+  }, 60000);
 });
 
 // ---------------------------------------------------------------------------
@@ -978,16 +1250,63 @@ describe('execCommandAsync', () => {
 
   // The same wrapper handling as execCommand: bd and gh installed through npm
   // are .cmd files, which cannot be spawned directly.
-  (onWindows ? it : it.skip)('runs a .cmd wrapper and keeps its arguments intact', async () => {
+  it('runs a .cmd wrapper and keeps its arguments intact', async ({ skip }) => {
+    skip(!onWindows, ONLY_WINDOWS);
     const out = await execCommandAsync(
-      'cp-async-printer', ['two words', 'a^b', 'x&&echo PWNED'], asyncWrapper('cp-async-printer'));
+      'cp-async-printer', ['two words', 'a^b', 'x&&echo PWNED', 'a|b>c', 'C:\\dir\\'],
+      asyncWrapper('cp-async-printer'));
 
-    expect(lines(out)).toEqual(['0=<two words>', '1=<a^b>', '2=<x&&echo PWNED>']);
+    expect(lines(out)).toEqual([
+      '0=<two words>', '1=<a^b>', '2=<x&&echo PWNED>', '3=<a|b>c>', '4=<C:\\dir\\>',
+    ]);
+  });
+
+  it('runs a .cmd wrapper given by a full path with a space in it', async ({ skip }) => {
+    skip(!onWindows, ONLY_WINDOWS);
+    const { wrapper } = cmdWrapper('cp-async-full-path');
+
+    expect(lines(await execCommandAsync(wrapper, ['one', 'two words']))).toEqual(['0=<one>', '1=<two words>']);
+  });
+
+  // As for execCommand: not sent at all, on the first call or a later one.
+  Object.entries(REFUSED_ARGS).forEach(([what, payload], i) => {
+    it(`refuses to pass ${what} through cmd.exe, and says so in the error log`, async ({ skip }) => {
+      skip(!onWindows, ONLY_WINDOWS);
+      const name = `cp-refuse-async-${i}`;
+      const tool = cmdWrapper(name);
+
+      await loggingTo(tool.dir, async () => {
+        expect(await execCommandAsync(name, ['ok', payload], tool.opts)).toBeNull();
+        expect(lines(await execCommandAsync(name, ['ok'], tool.opts))).toEqual(['0=<ok>']);
+        expect(await execCommandAsync(name, [payload], tool.opts)).toBeNull();
+        expect(await execCommandJSONAsync(name, [payload], tool.opts)).toBeNull();
+      });
+
+      expect(fs.existsSync(tool.strayFile)).toBe(false);
+      expect(tool.log()).toContain(name);
+      expect(tool.log()).toContain('cmd.exe');
+    });
+  });
+
+  // Stopping cmd.exe alone left the program behind the wrapper running.
+  it('stops the program behind a .cmd wrapper when its time is up', async ({ skip }) => {
+    skip(!onWindows, ONLY_WINDOWS);
+    const tool = hangingWrapper('cp-hang-async');
+    let pid = null;
+    try {
+      expect(await loggingTo(tool.dir, () => execCommandAsync('cp-hang-async', [], tool.opts))).toBeNull();
+      pid = tool.pid();
+      expect(pid, 'the program never started, so nothing was tested').not.toBeNull();
+      expect(await goneWithin(pid, 3000)).toBe(true);
+    } finally {
+      reap(pid || tool.pid());
+    }
   });
 
   // The first call learns that the name is a wrapper; the second goes to
   // cmd.exe straight away.
-  (onWindows ? it : it.skip)('goes straight to cmd.exe for a wrapper it already knows', async () => {
+  it('goes straight to cmd.exe for a wrapper it already knows', async ({ skip }) => {
+    skip(!onWindows, ONLY_WINDOWS);
     const opts = asyncWrapper('cp-async-twice');
 
     const first = await execCommandAsync('cp-async-twice', ['one', 'a^b'], opts);
