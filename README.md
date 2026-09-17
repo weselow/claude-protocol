@@ -58,6 +58,17 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+- **Worktrees of merged branches are reported again** — the session-start
+  check asked git about a branch literally called `main`, could not see a
+  squash-merged pull request, and missed every worktree branch anyway,
+  because git lists those with a `+ ` in front. It never fired and never
+  said why. The main branch now comes from `origin/HEAD`, merged branches
+  from both `gh pr list --state merged` and `git branch --merged`, and when
+  neither answers the session is told. A branch nobody has committed on yet
+  is not taken for a merged one. The bead id is printed only when bd
+  confirms it, and the cleanup hint is `git worktree remove --force` plus
+  `git worktree prune`.
+
 ### v3.9.2 (2026-09-07)
 
 - **A new version is announced within a day, not a week** — the update check
