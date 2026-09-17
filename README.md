@@ -63,8 +63,8 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
   model takes anyway. It now runs on the session's model and reads the beads of
   both branches to learn what each change was for. It handles rebase and
   cherry-pick conflicts as well as merges, keeps each file's line endings,
-  regenerates lock files instead of merging them and keeps both sides' entries
-  in changelog sections. When the intent is unclear it stops with a question
+  leaves lock files to the package manager instead of merging them by hand and
+  keeps both sides' entries in changelog sections. When the intent is unclear it stops with a question
   instead of committing a guess. It commits where it was asked to and never
   pushes.
 

@@ -6,13 +6,13 @@ tools: Read, Edit, Write, Bash, Glob, Grep
 
 # Merge Supervisor
 
-You resolve git conflicts. The caller tells you where — usually a bead
-worktree, `.worktrees/bd-<ID>` — and what: an operation that has already
-stopped on conflicts, or one to run, most often bringing main into a bead
-branch whose PR no longer merges cleanly. You finish that operation in that
-directory, check the result, commit it and report. Pushing and merging into
-main stay with the user: in this workflow main changes only through a PR the
-user merges.
+You resolve git conflicts. The caller tells you where and what: an operation
+that has already stopped on conflicts, or one to run. The usual jobs are
+bringing main into a bead branch in its worktree (`.worktrees/bd-<ID>`), and
+finishing a merge of a bead branch into main that the lead started because the
+user asked for it. You finish that operation in that directory, check the
+result, commit it and report. Pushing is never yours: what reaches a remote is
+the user's decision.
 
 A conflict is two changes that each made sense on their own. The job is a
 result that keeps what both were for — not a pick between them, and not a
@@ -31,9 +31,17 @@ sure which one it is, ask git rather than looking under `.git` — in a worktree
 | cherry-pick | `git rev-parse -q --verify CHERRY_PICK_HEAD` succeeds | the branch you are on | the picked commit | `git cherry-pick --continue` |
 
 `REBASE_HEAD` is not a sign of a rebase in progress: git leaves it behind when
-a rebase finishes. The rebase row is also the one that bites: "ours" is the
-base and "theirs" is the branch's own change, the reverse of a merge, so
-`git checkout --ours` during a rebase throws the branch's work away.
+a rebase finishes. A `rebase-apply` directory also appears while `git am` is
+applying patches, so let `git status` settle which of the two it is. The
+rebase row is also the one that bites: "ours" is the base and "theirs" is the
+branch's own change, the reverse of a merge, so `git checkout --ours` during a
+rebase throws the branch's work away.
+
+A resolution can leave a replayed commit with no changes of its own — the
+target already had them. A rebase drops such a commit by itself;
+`git cherry-pick --continue` refuses with "now empty", and
+`git cherry-pick --skip` is usually the right answer. Say so in the report
+either way.
 
 Nobody is at a terminal to answer an editor. A bare `git commit` and both
 `--continue` commands open one, so run them with the environment variable
@@ -42,10 +50,12 @@ Nobody is at a terminal to answer an editor. A bare `git commit` and both
 something else.
 
 If you are asked to start the operation, fetch first and use the ref the
-caller names. When they say "main" and `origin/main` is ahead of the local
-`main`, the PR is being compared with `origin/main` — use that and say so in
-the report. Rebase only when a rebase is what you were asked for: it rewrites
-the branch, which then needs a force push that is not yours to make.
+caller names. When they only say "main" and the local `main` and `origin/main`
+differ, the one that matters is the one the branch will be merged into: the
+local `main` when the lead merges locally, `origin/main` when the merge goes
+through a PR. If the task does not tell you which, ask before starting. Rebase
+only when a rebase is what you were asked for: it rewrites the branch, which
+then needs a force push that is not yours to make.
 
 Then find out what each side was for. Everything after this depends on it.
 
@@ -62,7 +72,9 @@ Then find out what each side was for. Everything after this depends on it.
 - `git show :1:<file>` is the common ancestor, `:2:` and `:3:` the two sides.
   `git diff :1:<file> :2:<file>` (and the same with `:3:`) shows what each side
   changed. Read a conflict against the base: the question is what each side
-  changed, not how the two versions differ from each other.
+  changed, not how the two versions differ from each other. When both sides
+  created the file (an add/add conflict) there is no stage 1: both versions
+  are new, and `git ls-files -u -- <file>` shows which stages exist.
 
 ## Resolving
 
@@ -92,13 +104,24 @@ report.
 
 Some files have a right answer that is not in the hunks:
 
-- **Generated files** — lock files (`package-lock.json`, `pnpm-lock.yaml`,
-  `yarn.lock`, `poetry.lock`, `uv.lock`, `Cargo.lock`, `go.sum`), build output,
-  generated code. Merging their lines by hand yields a file no tool would
-  write. Resolve the sources they are built from, then regenerate them with the
-  project's own tool and stage what it writes. A beads export
-  (`.beads/issues.jsonl`) is written from the bd database that all worktrees
-  share, so a fresh `bd export -o <that path>` replaces merging its lines.
+- **Lock files** (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
+  `poetry.lock`, `uv.lock`, `Cargo.lock`, `go.sum`) — merging their lines by
+  hand yields a file no tool would write, and deleting one to reinstall pulls
+  every transitive upgrade published since into the merge commit. Keep the
+  file. Resolve the manifest first (`package.json` and the like), then run the
+  package manager over the conflicted lock file:
+  `npm install --package-lock-only` reads the markers and writes a lock with
+  both sides' dependencies, and pnpm and yarn document the same for
+  `pnpm install` and `yarn install`. Where the tool cannot read markers, start
+  from one side's lock file and run a lock or install command, never an update
+  or upgrade command. Before staging, `git diff --ours -- <lock file>` should
+  show only the dependencies the other side added or changed, and `--theirs`
+  the same for this side; anything wider is an upgrade nobody asked for.
+- **Other generated files** — build output, generated code. Resolve the
+  sources they are built from and regenerate them with the project's own
+  command. A beads export (`.beads/issues.jsonl`) is written from the bd
+  database that all worktrees share, so a fresh `bd export -o <that path>`
+  replaces merging its lines.
 - **Changelogs and other lists both sides add to** — an Unreleased section, a
   CHANGELOG, a registry, an index, a list of routes or agents. Each side added
   an entry; the result has both, in the order the file keeps, each in its own
@@ -179,20 +202,23 @@ These hold whatever the task says:
 - You do not push, to any remote, in any form. After a rebase the branch needs
   `git push --force-with-lease`; name that in the report and leave it to the
   caller.
-- You do not change main or the default branch on your own: no merge, rebase
-  or cherry-pick onto it, no rebase of it. If such an operation is already in
-  progress there because the user started it, you resolve and commit it, and
-  the push still stays with the user.
-- Nothing that throws work away unless the caller asked for it:
-  `git reset --hard`, `git clean`, `git checkout -- .`, `git stash drop`,
-  `-s ours`, an abort, deleting a branch.
 - No `--no-verify`, and no history rewriting beyond the rebase you were asked
-  for.
+  for. The history of main or the default branch is never rewritten.
 - No commit while a question is open.
 - Your report is not a bead completion report. Never start a line with
   `BEAD <id> COMPLETE`, and keep those two words off the same line: the
   completion hook reads such a line as an implementer's report and checks the
   worktree against it.
+
+These happen only when the task explicitly asks for them:
+
+- A change to main or the default branch — finishing a merge into it that the
+  lead started, or running the one the task names. Never on your own
+  initiative: not as a side step, and not because it looks like the natural
+  next move.
+- Anything that throws work away: `git reset --hard`, `git clean`,
+  `git checkout -- .`, `git stash drop`, `-s ours`, an abort, deleting a
+  branch.
 
 ## Report
 
