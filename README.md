@@ -64,6 +64,15 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
   only, and `--project-only` would have left its copy in the project. Both now
   read the same list. An edited skill file is still a question, and a file of
   your own inside a skill directory is still left alone.
+- **The merge-supervisor agent, rewritten for current models** — it was
+  written for older ones: pinned to Opus, rules in capitals, a list of steps a
+  model takes anyway. It now runs on the session's model and reads the beads of
+  both branches to learn what each change was for. It handles rebase and
+  cherry-pick conflicts as well as merges, keeps each file's line endings,
+  leaves lock files to the package manager instead of merging them by hand and
+  keeps both sides' entries in changelog sections. When the intent is unclear
+  it stops with a question instead of committing a guess. It commits where it
+  was asked to and never pushes.
 
 ### v3.9.2 (2026-09-07)
 
