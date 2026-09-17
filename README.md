@@ -496,9 +496,11 @@ Subagents are blocked from finishing unless:
 When an implementer leaves `AWAITING REVIEW`, hand the work to the
 `code-reviewer` agent, or run the skill yourself: `/bead-review` after an `npx`
 install, `/claude-protocol:bead-review` with the plugin. Both follow one
-procedure, `.claude/skills/bead-review/SKILL.md`: read the project's rules and
-the bead, pin the base and head SHAs, read the change and the code around it,
-run what the verdict depends on, then report.
+procedure, the skill's `SKILL.md`: read the project's rules and the bead, pin
+the base and head SHAs, read the change and the code around it, run what the
+verdict depends on, then report. After an `npx` install the skill is in
+`.claude/skills/bead-review/`; the plugin keeps it in its own
+`templates/skills/bead-review/`.
 
 The report names the head SHA it checked and ends in `changes needed` or `no
 blocking findings`. Findings are numbered R1, R2… and keep their numbers on a
@@ -516,8 +518,8 @@ Review proj-42 on main..bd-proj-42 at 3f2c1ab. npm test passes.
 Re-review proj-42 at 9e81d04. Previous report above; R1 and R3 fixed, R2 disputed.
 ```
 
-A lead or an implementer asking for a review can fill in
-`.claude/skills/bead-review/handoff.md`. The skill is called `bead-review`,
+A lead or an implementer asking for a review can fill in the form in the
+skill's `handoff.md`. The skill is called `bead-review`,
 not `code-review`, so that it does not replace Claude Code's own
 `/code-review`. Apart from one short section, nothing in it is specific to
 Claude Code, so an agent that reads the same SKILL.md format, such as Codex,

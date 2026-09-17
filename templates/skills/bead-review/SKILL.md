@@ -62,7 +62,8 @@ can and name the gap under "Not covered".
    - A branch: `git rev-parse <branch>`; the base is
      `git merge-base <default-branch> <branch>`.
    - A PR: `gh pr view <n> --json number,title,headRefName,headRefOid,baseRefName,state`,
-     then `git fetch origin <headRefName>` and check that
+     then `git fetch origin pull/<n>/head` (on GitHub this works for a PR
+     from a fork too, whose branch is not in `origin`) and check that
      `git rev-parse FETCH_HEAD` equals `headRefOid`. The base is the merge base
      with `origin/<baseRefName>`.
    - A range `base..head`: `git rev-parse <base> <head>`.
@@ -92,11 +93,12 @@ can and name the gap under "Not covered".
    whose HEAD is the pinned head and whose `git status` is clean; the
    implementer's worktree often is, so check and then name the tree in the
    report. Never `git checkout` or `git switch` to reach the head: the
-   checkout you are in usually belongs to someone who is working in it. With
-   no such tree, read the files with `git show` and put the checks you could
-   not run under "Not covered". In a beads project do not make a new worktree
-   with plain `git worktree add`, which leaves a shadow `.beads/` copy; use
-   `bd worktree create`, or ask.
+   checkout you are in usually belongs to someone who is working in it. Do not
+   create a worktree or a branch of your own either; that is a change too, and
+   in a beads project a plain `git worktree add` also leaves a shadow
+   `.beads/` copy. With no such tree, read the files with `git show`, put the
+   checks you could not run under "Not covered", and say which tree at which
+   head would let you run them.
 7. **Write the findings** as described below, then read them once more
    against the code. Drop what you cannot back up, or turn it into a question.
 
@@ -194,6 +196,9 @@ Input: the previous report, or its findings, and the new head SHA.
    - `withdrawn`: the finding was wrong; say why
    - `disputed`: the author disagrees; state both sides. It stays open and
      the user decides.
+   - `answered`, for a question: say whether the answer settles it. If the
+     answer shows a defect, the finding keeps its id and moves to Defects
+     with a priority.
 4. A problem that is still there keeps its old id; it is never filed again
    under a new one. New findings, and only those, continue the sequence: after
    R1 to R4 the next one is R5, even if R1 to R4 are all fixed.
@@ -214,11 +219,13 @@ Input: the previous report, or its findings, and the new head SHA.
 ## Delivering the report
 
 - By default the report is your answer, or your final message as a subagent.
-- Asked to post it on the PR: `gh pr comment <n> --body-file <file>` with the
-  same text. In a fork, add `--repo <owner>/<name>`, or it may land in the
-  repository the fork came from.
+- Asked to post it on the PR: `gh pr comment <n> --body-file -` with the same
+  text on standard input. In a fork, add `--repo <owner>/<name>`, or it may
+  land in the repository the fork came from.
 - Asked to post it on the bead: `bd comments add <id> -f <file>`, with the
-  report starting `REVIEW round <n> at <short SHA>: <verdict>`.
+  report starting `REVIEW round <n> at <short SHA>: <verdict>`. Put that file
+  in a temporary directory outside the repository, so the tree stays as you
+  found it.
 - Nothing else changes: no status, no close, no merge.
 
 ## Claude Code
@@ -234,8 +241,11 @@ Input: the previous report, or its findings, and the new head SHA.
   with the plugin. `/code-review` is Claude Code's own PR review, a different
   skill; this one is named `bead-review` so that it does not replace it.
 - **Nothing that looks like a completion report.** The project's SubagentStop
-  hook (`validate-completion.cjs`) takes a line starting `BEAD <id> COMPLETE`,
-  together with a `Worktree:` or `Branch:` line that names `bd-...`, as an
-  implementer finishing a task, and then checks that worktree, the push and
-  the checklist. A review never writes such lines; the report form above has
-  none.
+  hook (`validate-completion.cjs`) reads your final message as an implementer
+  finishing a task when one line has `BEAD <id> COMPLETE` and one line has
+  `Worktree:` or `Branch:` followed by `bd-...`. Depending on the version it
+  matches anywhere in a line, quotes and code spans included. It then checks
+  the checklist, the worktree, the push and the length of the message, and
+  stops you. The report form above has no such lines; when evidence would
+  quote one (from an implementer's report, a rule file or the hook's own
+  tests), describe it in words or cite `path:line` instead of quoting it.
