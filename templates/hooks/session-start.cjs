@@ -134,69 +134,153 @@ function collectMergedWorktrees(projectDir, repoRoot, output) {
   const worktrees = listBeadWorktrees(repoRoot);
   if (worktrees.length === 0) return;
 
-  const merged = collectMergedBranches(repoRoot, worktrees.map(worktree => worktree.branch));
-  if (!merged) {
-    output.push('WARNING: could not tell which .worktrees/bd-* branches were merged.');
-    output.push('   Neither gh (merged pull requests) nor git (branches merged into');
-    output.push('   the main branch) answered, so leftover worktrees go unreported.');
-    output.push('');
-    return;
-  }
+  const branches = worktrees.map(worktree => worktree.branch);
+  const sources = {
+    github: mergedPullRequests(repoRoot, branches),
+    git: branchesMergedInGit(repoRoot, branches),
+  };
+  if (!sources.github && !sources.git) return warnNobodyAnswered(output);
 
-  const done = worktrees.filter(worktree => merged.has(worktree.branch));
-  if (done.length === 0) return;
+  const found = worktrees
+    .map(worktree => ({ ...worktree, verdict: mergeVerdict(repoRoot, worktree, sources) }))
+    .filter(worktree => worktree.verdict);
+  if (found.length === 0) return;
 
-  const beads = confirmedBeads(done.map(worktree => worktree.beadGuess));
-  for (const worktree of done) {
+  const beads = confirmedBeads(found.map(worktree => worktree.beadGuess));
+  for (const worktree of found) {
     reportMergedWorktree(worktree, beads.get(worktree.beadGuess), output);
   }
 }
 
-/** Worktrees under .worktrees/bd-*, with the branch each one has checked out. */
+function warnNobodyAnswered(output) {
+  output.push('WARNING: could not tell which .worktrees/bd-* branches were merged.');
+  output.push('   Neither GitHub (merged pull requests of origin) nor git (branches');
+  output.push('   merged into the main branch) answered, so leftover worktrees go');
+  output.push('   unreported.');
+  output.push('');
+}
+
+/** Worktrees under .worktrees/bd-*, each with its branch, tip and lock. */
 function listBeadWorktrees(repoRoot) {
   const list = execCommand('git', ['-C', repoRoot, 'worktree', 'list', '--porcelain']);
   if (!list) return [];
+  return list.split(/\r?\n\r?\n/).map(parseWorktreeEntry).filter(Boolean);
+}
 
-  const worktrees = [];
-  for (const entry of list.split(/\r?\n\r?\n/)) {
-    const lines = entry.split(/\r?\n/);
-    const where = lines.find(line => line.startsWith('worktree '));
-    const ref = lines.find(line => line.startsWith('branch refs/heads/'));
-    // A detached worktree has no branch that could have been merged.
-    if (!where || !ref || !where.includes('.worktrees/bd-')) continue;
+/** One `git worktree list --porcelain` entry, or null if it is not ours. */
+function parseWorktreeEntry(entry) {
+  const lines = entry.split(/\r?\n/);
+  const field = (name) => {
+    const line = lines.find(candidate => candidate.startsWith(`${name} `));
+    return line ? line.slice(name.length + 1) : '';
+  };
+  const where = field('worktree');
+  const ref = field('branch');
+  // A detached worktree has no branch that could have been merged.
+  if (!where.includes('.worktrees/bd-') || !ref.startsWith('refs/heads/')) return null;
 
-    const branch = ref.slice('branch refs/heads/'.length);
-    worktrees.push({
-      path: where.slice('worktree '.length),
-      branch,
-      beadGuess: branch.startsWith('bd-') ? branch.slice('bd-'.length) : '',
-    });
-  }
-  return worktrees;
+  const branch = ref.slice('refs/heads/'.length);
+  return {
+    path: where,
+    branch,
+    head: field('HEAD'),
+    locked: lines.some(line => line === 'locked' || line.startsWith('locked ')),
+    beadGuess: branch.startsWith('bd-') ? branch.slice('bd-'.length) : '',
+  };
 }
 
 /**
- * Names of merged branches, or null when no source could answer.
+ * 'merged', 'unconfirmed' (looks merged, but there is no reflog to check it
+ * against), or null.
  *
- * Two sources, because each misses what the other sees: a squash-merged pull
- * request never becomes an ancestor of the main branch, and a branch merged
- * locally never shows up on GitHub. git is asked about `candidates` only.
+ * Neither source is taken at its word. git lists every branch whose tip sits
+ * on the main branch's history — a fresh one, or one whose commit was undone
+ * with `git reset` — so its answer counts only when the tip is a commit made
+ * on this branch. GitHub knows branch names, and short names come back, so a
+ * pull request counts only when it was merged with this tip in it, and only
+ * for a branch someone has committed on.
  */
-function collectMergedBranches(repoRoot, candidates) {
-  const fromGitHub = mergedPullRequestBranches();
-  const fromGit = branchesMergedInGit(repoRoot, candidates);
-  if (!fromGitHub && !fromGit) return null;
-  return new Set([...(fromGitHub || []), ...(fromGit || [])]);
+function mergeVerdict(repoRoot, worktree, sources) {
+  const byGit = Boolean(sources.git && sources.git.has(worktree.branch));
+  const byGitHub = (sources.github || []).some(pr => pr.headRefName === worktree.branch
+    && pullRequestContains(repoRoot, pr.headRefOid, worktree.head));
+  if (!byGit && !byGitHub) return null;
+
+  const history = branchHistory(repoRoot, worktree);
+  if (!history) return 'unconfirmed';
+  if (byGit && history.tipCommitted) return 'merged';
+  if (byGitHub && history.everCommitted) return 'merged';
+  return null;
 }
 
-function mergedPullRequestBranches() {
-  const prs = execCommandJSON('gh', [
-    'pr', 'list', '--state', 'merged', '--limit', '100', '--json', 'headRefName',
+/** True when a merged pull request's head is this tip or comes after it. */
+function pullRequestContains(repoRoot, prHead, tip) {
+  if (!tip || typeof prHead !== 'string' || !/^[0-9a-f]{40,64}$/.test(prHead)) return false;
+  if (prHead === tip) return true;
+  // null is both "not an ancestor" and "that commit is not here at all".
+  return execCommand('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', tip, prHead]) !== null;
+}
+
+/**
+ * What the branch's own reflog says about commits made on it, or null when
+ * there is no reflog: gc expires it after 90 days, and
+ * core.logAllRefUpdates=false never writes one.
+ */
+function branchHistory(repoRoot, worktree) {
+  const reflog = execCommand('git', [
+    '-C', repoRoot, 'reflog', 'show', '--format=%H %gs', `refs/heads/${worktree.branch}`, '--',
   ]);
-  if (!Array.isArray(prs)) return null;
-  return prs.map(pr => pr && pr.headRefName).filter(Boolean);
+  if (!reflog) return null;
+
+  // "<hash> commit: ...", "<hash> commit (amend): ..." — not reset, merge,
+  // rebase or the branch's creation, which move it without making anything.
+  const commits = reflog.split(/\r?\n/)
+    .map(line => line.split(' '))
+    .filter(([, action]) => action && action.startsWith('commit'));
+  return {
+    everCommitted: commits.length > 0,
+    tipCommitted: commits.some(([hash]) => hash === worktree.head),
+  };
 }
 
+/**
+ * Merged pull requests of origin, or null when GitHub could not be asked.
+ *
+ * Always about origin by name: without a default repository set, gh picks the
+ * fork's parent on its own and answers with an empty list, which looks
+ * exactly like "nothing merged". With a few worktrees each branch is asked
+ * about by name, which finds a merge however old; with many, one list of the
+ * latest merges has to do.
+ */
+function mergedPullRequests(repoRoot, branches) {
+  const repo = githubRepo(repoRoot);
+  if (!repo) return null;
+
+  const ask = (...filter) => execCommandJSON('gh', [
+    'pr', 'list', '--repo', repo, '--state', 'merged', ...filter,
+    '--json', 'headRefName,headRefOid',
+  ]);
+  const fewWorktrees = branches.length <= 5;
+  const answers = fewWorktrees
+    ? branches.map(branch => ask('--head', branch))
+    : [ask('--limit', '200')];
+  if (!answers.every(Array.isArray)) return null;
+  return answers.flat().filter(pr => pr && typeof pr.headRefName === 'string');
+}
+
+/**
+ * owner/name of origin when origin is on GitHub, or null. Accepts
+ * https://github.com/o/n, git@github.com:o/n and ssh://git@github.com/o/n,
+ * with or without .git.
+ */
+function githubRepo(repoRoot) {
+  const url = execCommand('git', ['-C', repoRoot, 'remote', 'get-url', 'origin']) || '';
+  const match = /^(?:https:\/\/(?:[^@/]+@)?github\.com\/|(?:ssh:\/\/)?git@github\.com[:/])([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/
+    .exec(url);
+  return match ? `${match[1]}/${match[2]}` : null;
+}
+
+/** Those of `candidates` git lists as merged into the main branch, or null. */
 function branchesMergedInGit(repoRoot, candidates) {
   const main = resolveMainBranch(repoRoot);
   if (!main) return null;
@@ -206,38 +290,27 @@ function branchesMergedInGit(repoRoot, candidates) {
     '-C', repoRoot, 'branch', '--format=%(refname:short)', '--merged', main,
   ]);
   if (merged === null) return null;
-  return merged.split(/\r?\n/).map(name => name.trim())
-    .filter(name => candidates.includes(name) && hasOwnCommits(repoRoot, name));
+  return new Set(merged.split(/\r?\n/).map(name => name.trim())
+    .filter(name => candidates.includes(name)));
 }
 
 /**
- * True when someone ever committed on this branch.
- *
- * `git branch --merged` also lists a branch with no commits of its own — it
- * sits on the main branch's history as well. That is every worktree created a
- * minute ago, and the advice would be to force-remove it while someone works
- * in it. The branch's own reflog tells the two apart. A branch whose reflog is
- * gone counts as not merged: a cleanup nobody hears about costs less than a
- * worktree removed from under someone.
- */
-function hasOwnCommits(repoRoot, branch) {
-  const reflog = execCommand('git', [
-    '-C', repoRoot, 'reflog', 'show', '--format=%gs', `refs/heads/${branch}`, '--',
-  ]);
-  return Boolean(reflog) && reflog.split(/\r?\n/).some(entry => entry.startsWith('commit'));
-}
-
-/**
- * The main branch: whatever origin/HEAD names, as a clone records it.
- * Without it, main before master — a repository carrying both has usually
- * moved to main and kept the old one around.
+ * The ref to measure merges against. The name comes from origin/HEAD, as a
+ * clone records it; without it, main before master — a repository carrying
+ * both has usually moved to main and kept the old one around. origin's copy
+ * comes first: a local main nobody has pulled lately does not know what was
+ * merged.
  */
 function resolveMainBranch(repoRoot) {
   const git = (...args) => execCommand('git', ['-C', repoRoot, ...args]);
   const head = git('symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD');
-  if (head) return head.replace(/^refs\/remotes\/origin\//, '');
-  return ['main', 'master']
-    .find(name => git('rev-parse', '--verify', '--quiet', `refs/heads/${name}`)) || null;
+  const names = head ? [head.replace(/^refs\/remotes\/origin\//, '')] : ['main', 'master'];
+  for (const name of names) {
+    const ref = [`refs/remotes/origin/${name}`, `refs/heads/${name}`]
+      .find(candidate => git('rev-parse', '--verify', '--quiet', candidate));
+    if (ref) return ref;
+  }
+  return null;
 }
 
 /**
@@ -262,20 +335,48 @@ function confirmedBeads(guesses) {
   return beads;
 }
 
-/**
- * The cleanup is `git worktree remove --force` and `git worktree prune`:
- * `bd worktree remove` is broken on Windows (u51), and the rules allow these.
- */
 function reportMergedWorktree(worktree, bead, output) {
-  output.push(`ACTION REQUIRED: branch ${worktree.branch} was merged, but its worktree is still here.`);
-  if (!bead) {
-    output.push('   bd did not confirm which bead it belongs to — look the bead up and');
-    output.push('   close it if it is still open.');
-  } else if (bead.status !== 'closed') {
-    output.push(`   Its bead ${bead.id} is still ${bead.status}: bd close "${bead.id}"`);
-  }
-  output.push(`   Remove it: git worktree remove --force "${worktree.path}" && git worktree prune`);
+  const confirmed = worktree.verdict === 'merged';
+  output.push(confirmed
+    ? `ACTION REQUIRED: branch ${worktree.branch} was merged, but its worktree is still here.`
+    : `CHECK BY HAND: branch ${worktree.branch} looks merged, but git keeps no reflog for it to confirm that.`);
+  output.push(...beadLines(bead));
+  output.push(...(confirmed ? cleanupLines(worktree) : [`   Worktree: ${worktree.path}`]));
   output.push('');
+}
+
+function beadLines(bead) {
+  if (!bead) {
+    return [
+      '   bd did not confirm which bead it belongs to — look the bead up and',
+      '   close it if it is still open.',
+    ];
+  }
+  if (bead.status === 'closed') return [];
+  return [`   Its bead ${bead.id} is still ${bead.status}: bd close "${bead.id}"`];
+}
+
+/**
+ * How to clean up, or why not to.
+ *
+ * `git worktree remove --force` deletes uncommitted work without asking, so it
+ * is suggested only for a worktree whose status reads clean — whatever the
+ * merge check above concluded. A locked worktree refuses a single --force,
+ * and `&&` would then skip the prune. `bd worktree remove` is broken on
+ * Windows (u51); the rules allow these two commands instead.
+ */
+function cleanupLines(worktree) {
+  if (worktree.locked) {
+    return [`   It is locked (git worktree lock), so it is left alone: ${worktree.path}`];
+  }
+  const status = execCommand('git', ['-C', worktree.path, 'status', '--porcelain']);
+  if (status !== '') {
+    return [
+      '   Not suggesting removal: it holds uncommitted work, or its state could',
+      `   not be read. Look at it by hand: ${worktree.path}`,
+    ];
+  }
+  return [`   Remove it: git worktree remove --force "${worktree.path}" && git worktree prune`];
 }
 
 /** Open pull requests are easy to forget between sessions. */

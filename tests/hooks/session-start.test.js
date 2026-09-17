@@ -85,6 +85,7 @@ describe('session-start on a project installed twice', () => {
 // ---------------------------------------------------------------------------
 
 const onWindows = process.platform === 'win32';
+const GITHUB = 'https://github.com/acme/widgets.git';
 
 /** git with an identity of its own: a bare CI machine has none to commit with. */
 function git(cwd, ...args) {
@@ -97,28 +98,41 @@ function git(cwd, ...args) {
 }
 
 /**
- * A project whose repository has one worktree, .worktrees/<branch>.
- *   work       — 'merged': a commit of its own, merged into main;
- *                'ahead':  a commit of its own and nothing more, the way a
- *                          squash merge leaves it: merged on GitHub, never an
- *                          ancestor of main;
- *                'fresh':  no commit of its own yet.
- *   originHead — origin/HEAD names the main branch, as it does in a clone.
+ * A worktree .worktrees/<branch> in the repository at `dir`.
+ *   work — 'merged': a commit of its own, merged into main;
+ *          'ahead':  a commit of its own and nothing more, the way a squash
+ *                    merge leaves it: merged on GitHub, never an ancestor of
+ *                    main;
+ *          'fresh':  no commit of its own yet.
+ * Returns the path the way git prints it: forward slashes on Windows too.
  */
-function repoWithWorktree({ main = 'main', branch = 'bd-x', work = 'merged', originHead = false } = {}) {
+function addWorktree(dir, branch, work) {
+  const where = path.join(dir, '.worktrees', branch);
+  git(dir, 'worktree', 'add', '-q', '-b', branch, where);
+  if (work !== 'fresh') git(where, 'commit', '-q', '--allow-empty', '-m', `work on ${branch}`);
+  if (work === 'merged') git(dir, 'merge', '-q', '--no-ff', '-m', `merge ${branch}`, branch);
+  return git(where, 'rev-parse', '--show-toplevel');
+}
+
+/**
+ * A project whose repository has one worktree (see addWorktree).
+ *   origin     — the URL of an origin remote, if there is to be one.
+ *   originHead — origin/<main> and origin/HEAD, as a clone that has pushed
+ *                its main branch has them.
+ */
+function repoWithWorktree({
+  main = 'main', branch = 'bd-x', work = 'merged', origin, originHead = false,
+} = {}) {
   const dir = project();
   git(dir, 'init', '-q', '-b', main);
   git(dir, 'commit', '-q', '--allow-empty', '-m', 'start');
+  if (origin) git(dir, 'remote', 'add', 'origin', origin);
+  const worktree = addWorktree(dir, branch, work);
   if (originHead) {
     git(dir, 'update-ref', `refs/remotes/origin/${main}`, 'HEAD');
     git(dir, 'symbolic-ref', 'refs/remotes/origin/HEAD', `refs/remotes/origin/${main}`);
   }
-  const worktree = path.join(dir, '.worktrees', branch);
-  git(dir, 'worktree', 'add', '-q', '-b', branch, worktree);
-  if (work !== 'fresh') git(worktree, 'commit', '-q', '--allow-empty', '-m', 'work');
-  if (work === 'merged') git(dir, 'merge', '-q', '--no-ff', '-m', 'merge', branch);
-  // The path the way git prints it: forward slashes on Windows too.
-  return { dir, worktree: git(worktree, 'rev-parse', '--show-toplevel') };
+  return { dir, worktree, tip: () => git(worktree, 'rev-parse', 'HEAD') };
 }
 
 /**
@@ -160,22 +174,28 @@ function pathWith(dir) {
 
 /**
  * Fake gh and bd.
- *   merged — the branches `gh pr list --state merged` answers with, or null
- *            for a gh that fails, as it does without a GitHub remote.
- *   beads  — what bd knows. Like the real one, `bd show` also answers a
- *            partial id with the bead whose id ends in it.
- * Every gh call is logged, so a test can tell whether it was asked at all.
+ *   prs   — the pull requests `gh pr list --state merged` knows for
+ *           acme/widgets, as { headRefName, headRefOid }, or null for a gh
+ *           that fails. Asked about any other repository — or about none,
+ *           which is how gh without a default repository ends up answering
+ *           about the fork's parent — it answers with an empty list.
+ *   beads — what bd knows. Like the real one, `bd show` also answers a
+ *           partial id with the bead whose id ends in it.
+ * Every gh call is logged, so a test can tell what was asked.
  */
-function fakeTools({ merged = null, beads = [] } = {}) {
+function fakeTools({ prs = null, beads = [] } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-start-bin-'));
   const log = path.join(dir, 'gh-calls.log');
   writeTool(dir, 'gh', `
 const args = process.argv.slice(2);
 fs.appendFileSync(path.join(__dirname, 'gh-calls.log'), args.join(' ') + '\\n');
+const value = (flag) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : null);
 if (!args.includes('merged')) { console.log('[]'); process.exit(0); }
-const merged = ${JSON.stringify(merged)};
-if (merged === null) process.exit(1);
-console.log(JSON.stringify(merged.map(headRefName => ({ headRefName }))));
+const prs = ${JSON.stringify(prs)};
+if (prs === null) process.exit(1);
+if (value('--repo') !== 'acme/widgets') { console.log('[]'); process.exit(0); }
+const head = value('--head');
+console.log(JSON.stringify(prs.filter(pr => head === null || pr.headRefName === head)));
 `);
   writeTool(dir, 'bd', `
 const [command, ...args] = process.argv.slice(2);
@@ -190,18 +210,19 @@ console.log(JSON.stringify(found));
   };
 }
 
+const pr = (headRefOid, headRefName = 'bd-x') => ({ headRefName, headRefOid });
+const report = (repo, tools = fakeTools()) => runHook(repo.dir, tools.env).stdout;
+
 // A repository, a worktree and a dozen processes per test, several of them
 // through cmd.exe on Windows: on a loaded machine that neared the 15 s default.
 const SLOW = { timeout: 30000 };
 
 describe('session-start on a worktree whose branch was merged', SLOW, () => {
-  const report = (repo, tools) => runHook(repo.dir, tools.env).stdout;
-
   // Also the case the old check could never see: git marks a branch checked
   // out in another worktree with "+ ", and every bd-* branch is one.
   it('finds it in a repository whose main branch is master', () => {
     const repo = repoWithWorktree({ main: 'master' });
-    const out = report(repo, fakeTools());
+    const out = report(repo);
 
     expect(out).toContain('branch bd-x was merged');
     expect(out).toContain(`git worktree remove --force "${repo.worktree}"`);
@@ -211,45 +232,101 @@ describe('session-start on a worktree whose branch was merged', SLOW, () => {
   it('takes the main branch from origin/HEAD, whatever it is called', () => {
     const repo = repoWithWorktree({ main: 'trunk', originHead: true });
 
-    expect(report(repo, fakeTools())).toContain('branch bd-x was merged');
+    expect(report(repo)).toContain('branch bd-x was merged');
+  });
+
+  it("goes by origin's main branch when the local one is behind it", () => {
+    const repo = repoWithWorktree({ originHead: true });
+    git(repo.dir, 'reset', '-q', '--hard', 'HEAD~1');
+
+    expect(report(repo)).toContain('branch bd-x was merged');
   });
 
   it('finds a branch merged by fast-forward, with no merge commit to show', () => {
     const repo = repoWithWorktree({ work: 'ahead' });
     git(repo.dir, 'merge', '-q', '--ff-only', 'bd-x');
 
-    expect(report(repo, fakeTools())).toContain('branch bd-x was merged');
+    expect(report(repo)).toContain('branch bd-x was merged');
   });
 
   it('finds a squash-merged branch among the merged pull requests', () => {
-    const repo = repoWithWorktree({ work: 'ahead' });
+    const repo = repoWithWorktree({ work: 'ahead', origin: GITHUB });
+    const tools = fakeTools({ prs: [pr(repo.tip())] });
 
-    expect(report(repo, fakeTools({ merged: ['bd-x'] })))
-      .toContain('branch bd-x was merged');
+    expect(report(repo, tools)).toContain('branch bd-x was merged');
+    // Few worktrees: each branch is asked about by name, however old its merge.
+    expect(tools.ghCalls()).toContain('--head bd-x');
   });
 
-  it('says so when neither gh nor git can tell what was merged', () => {
-    const repo = repoWithWorktree({ main: 'trunk' });
-    const out = report(repo, fakeTools());
+  it('asks GitHub about the origin repository, not whichever gh would pick', () => {
+    const repo = repoWithWorktree({ work: 'ahead', origin: 'git@github.com:acme/widgets.git' });
+    const tools = fakeTools({ prs: [pr(repo.tip())] });
+
+    expect(report(repo, tools)).toContain('branch bd-x was merged');
+    expect(tools.ghCalls()).toContain('--repo acme/widgets');
+  });
+
+  it('finds a pull request that was merged with more commits than the worktree has', () => {
+    const repo = repoWithWorktree({ work: 'ahead', origin: GITHUB });
+    const mine = repo.tip();
+    git(repo.worktree, 'commit', '-q', '--allow-empty', '-m', 'pushed from elsewhere');
+    const merged = repo.tip();
+    git(repo.worktree, 'reset', '-q', '--hard', mine);
+
+    expect(report(repo, fakeTools({ prs: [pr(merged)] }))).toContain('branch bd-x was merged');
+  });
+
+  // Short ids come back: bd-8t9 was merged here long before any new bd-8t9.
+  it('does not take a pull request of the same name for this branch', () => {
+    const repo = repoWithWorktree({ work: 'ahead', origin: GITHUB });
+    const tools = fakeTools({ prs: [pr('0123456789abcdef0123456789abcdef01234567')] });
+
+    expect(report(repo, tools)).not.toContain('was merged');
+  });
+
+  it('does not count a pull request the branch has moved past', () => {
+    const repo = repoWithWorktree({ work: 'ahead', origin: GITHUB });
+    const merged = repo.tip();
+    git(repo.worktree, 'commit', '-q', '--allow-empty', '-m', 'after the merge');
+
+    expect(report(repo, fakeTools({ prs: [pr(merged)] }))).not.toContain('was merged');
+  });
+
+  it('asks GitHub once, not per branch, when there are many worktrees', () => {
+    const repo = repoWithWorktree({ work: 'fresh', origin: GITHUB });
+    for (const n of [1, 2, 3, 4, 5]) addWorktree(repo.dir, `bd-y${n}`, 'fresh');
+    const tools = fakeTools({ prs: [] });
+    report(repo, tools);
+
+    expect(tools.ghCalls()).toContain('--limit');
+    expect(tools.ghCalls()).not.toContain('--head');
+  });
+
+  it('says so when neither GitHub nor git can tell what was merged', () => {
+    const repo = repoWithWorktree({ main: 'trunk', origin: 'https://gitlab.com/acme/widgets.git' });
+    const tools = fakeTools({ prs: [] });
+    const out = report(repo, tools);
 
     expect(out).toContain('could not tell which');
     expect(out).not.toContain('was merged');
+    // Not a GitHub origin: gh is not asked, and its silence is no answer.
+    expect(tools.ghCalls()).not.toContain('merged');
   });
 
   it('says nothing when the branch was not merged', () => {
-    const repo = repoWithWorktree({ work: 'ahead' });
-    const out = report(repo, fakeTools({ merged: ['bd-other'] }));
+    const repo = repoWithWorktree({ work: 'ahead', origin: GITHUB });
+    const out = report(repo, fakeTools({ prs: [pr(repo.tip(), 'bd-other')] }));
 
-    expect(out).not.toContain('was merged');
+    expect(out).not.toContain('merged');
     expect(out).not.toContain('could not tell');
   });
 
   // git lists a branch with no commits of its own as merged: it sits on main's
   // history too. The advice would be to force-remove a worktree in use.
   it('does not take a worktree nobody has committed in yet for a merged one', () => {
-    const repo = repoWithWorktree({ work: 'fresh' });
+    const repo = repoWithWorktree({ work: 'fresh', origin: GITHUB });
 
-    expect(report(repo, fakeTools({ merged: [] }))).not.toContain('was merged');
+    expect(report(repo, fakeTools({ prs: [pr(repo.tip())] }))).not.toContain('merged');
   });
 
   it('not even once main moved on and the fresh branch caught up with it', () => {
@@ -257,14 +334,34 @@ describe('session-start on a worktree whose branch was merged', SLOW, () => {
     git(repo.dir, 'commit', '-q', '--allow-empty', '-m', 'someone else');
     git(repo.worktree, 'merge', '-q', '--ff-only', 'main');
 
-    expect(report(repo, fakeTools({ merged: [] }))).not.toContain('was merged');
+    expect(report(repo)).not.toContain('merged');
+  });
+
+  it('not after a commit was undone and its changes left uncommitted', () => {
+    const repo = repoWithWorktree({ work: 'fresh' });
+    fs.writeFileSync(path.join(repo.worktree, 'work.txt'), 'unsaved');
+    git(repo.worktree, 'add', 'work.txt');
+    git(repo.worktree, 'commit', '-q', '-m', 'work');
+    git(repo.worktree, 'reset', '-q', 'HEAD~1');
+    const out = report(repo);
+
+    expect(out).not.toContain('merged');
+    expect(out).not.toContain('--force');
+  });
+
+  it('not after the branch was reset to main and its work thrown away', () => {
+    const repo = repoWithWorktree({ work: 'ahead' });
+    git(repo.worktree, 'reset', '-q', '--hard', 'main');
+
+    expect(report(repo)).not.toContain('merged');
   });
 
   it('does not ask about merges when there is no bd-* worktree', () => {
     const dir = project();
     git(dir, 'init', '-q');
+    git(dir, 'remote', 'add', 'origin', GITHUB);
     fs.mkdirSync(path.join(dir, '.worktrees'));
-    const tools = fakeTools({ merged: [] });
+    const tools = fakeTools({ prs: [] });
     const out = runHook(dir, tools.env).stdout;
 
     // The fake was reached (the open pull requests), just not about merges.
@@ -274,12 +371,55 @@ describe('session-start on a worktree whose branch was merged', SLOW, () => {
   });
 });
 
+describe('session-start on cleaning up a merged worktree', SLOW, () => {
+  // Whatever the merge check gets wrong, this line must not delete work.
+  it('does not suggest --force for a worktree with uncommitted work', () => {
+    const repo = repoWithWorktree();
+    fs.writeFileSync(path.join(repo.worktree, 'notes.txt'), 'unsaved');
+    const out = report(repo);
+
+    expect(out).toContain('branch bd-x was merged');
+    expect(out).toContain('uncommitted work');
+    expect(out).not.toContain('--force');
+  });
+
+  it('does not suggest --force for a worktree whose state cannot be read', () => {
+    const repo = repoWithWorktree();
+    fs.rmSync(repo.worktree, { recursive: true, force: true });
+    const out = report(repo);
+
+    expect(out).toContain('branch bd-x was merged');
+    expect(out).toContain('by hand');
+    expect(out).not.toContain('--force');
+  });
+
+  // A locked worktree refuses a single --force, and && would skip the prune.
+  it('says a locked worktree is locked instead of a command that fails', () => {
+    const repo = repoWithWorktree();
+    git(repo.dir, 'worktree', 'lock', repo.worktree);
+    const out = report(repo);
+
+    expect(out).toContain('locked');
+    expect(out).not.toContain('--force');
+  });
+
+  it('says a branch without a reflog only looks merged, and suggests nothing', () => {
+    const repo = repoWithWorktree();
+    fs.rmSync(path.join(repo.dir, '.git', 'logs', 'refs', 'heads', 'bd-x'));
+    const out = report(repo);
+
+    expect(out).toContain('branch bd-x looks merged');
+    expect(out).not.toContain('was merged');
+    expect(out).not.toContain('--force');
+  });
+});
+
 describe('session-start on the bead behind a merged worktree', SLOW, () => {
-  const report = (repo, beads) => runHook(repo.dir, fakeTools({ beads }).env).stdout;
+  const withBeads = (repo, beads) => report(repo, fakeTools({ beads }));
 
   it('names the bead and its status when bd knows that exact id', () => {
     const repo = repoWithWorktree({ branch: 'bd-app-7' });
-    const out = report(repo, [{ id: 'app-7', status: 'in_progress' }]);
+    const out = withBeads(repo, [{ id: 'app-7', status: 'in_progress' }]);
 
     expect(out).toContain('app-7 is still in_progress');
     expect(out).toContain('bd close "app-7"');
@@ -288,7 +428,7 @@ describe('session-start on the bead behind a merged worktree', SLOW, () => {
   // bd show 219 finds app-219, which does not make it the bead of bd-219.
   it('takes nothing from a partial match', () => {
     const repo = repoWithWorktree({ branch: 'bd-219' });
-    const out = report(repo, [{ id: 'app-219', status: 'open' }]);
+    const out = withBeads(repo, [{ id: 'app-219', status: 'open' }]);
 
     expect(out).toContain('branch bd-219 was merged');
     expect(out).not.toContain('app-219');
@@ -298,7 +438,7 @@ describe('session-start on the bead behind a merged worktree', SLOW, () => {
 
   it('names no bead when bd does not answer', () => {
     const repo = repoWithWorktree();
-    const out = report(repo, []);
+    const out = withBeads(repo, []);
 
     expect(out).toContain('branch bd-x was merged');
     expect(out).not.toContain('bd close');
@@ -308,7 +448,7 @@ describe('session-start on the bead behind a merged worktree', SLOW, () => {
 
   it('asks nothing more of a bead that is already closed', () => {
     const repo = repoWithWorktree();
-    const out = report(repo, [{ id: 'x', status: 'closed' }]);
+    const out = withBeads(repo, [{ id: 'x', status: 'closed' }]);
 
     expect(out).toContain('branch bd-x was merged');
     expect(out).not.toContain('bd close');
