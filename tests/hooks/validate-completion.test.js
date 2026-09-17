@@ -489,6 +489,15 @@ describe('validate-completion: the worktree', () => {
     expect(decision.reason).toContain(plain);
   });
 
+  it('sees an untracked file even where the config hides untracked files', () => {
+    const { dir, worktree } = project();
+    git(dir, 'config', 'status.showUntrackedFiles', 'no');
+    fs.writeFileSync(path.join(worktree, 'hidden.txt'), 'untracked\n');
+    const decision = runHook(dir);
+    expect(decision.decision).toBe('block');
+    expect(decision.reason).toContain('hidden.txt');
+  });
+
   it('blocks when the worktree status cannot be read', () => {
     const { dir, worktree } = project();
     const gitDir = git(worktree, 'rev-parse', '--absolute-git-dir');

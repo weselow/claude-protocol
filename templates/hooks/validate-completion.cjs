@@ -252,7 +252,8 @@ function isMainCheckout(worktree) {
 
 /** Block when the worktree has anything uncommitted, or git cannot tell. */
 function verifyCommitted(worktree) {
-  const status = git(worktree, 'status', '--porcelain');
+  // Explicit flags: status.showUntrackedFiles=no in any config hides new files.
+  const status = git(worktree, 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none');
   if (status === null) {
     block(
       `git could not read the worktree status: ${worktree}\n\n` +
