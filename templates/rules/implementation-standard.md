@@ -24,7 +24,8 @@ after each block, so a failure points at the last thing you wrote.
 
 ## Self-review (after completing a task)
 
-Launch a subagent to review written code. Checklist:
+Have the written code reviewed by the `code-reviewer` subagent — it follows
+the `bead-review` skill. Besides the task itself, the review checks:
 
 - Are there unhandled errors being silently swallowed?
 - Are there SQL injection, XSS, or other vulnerabilities at input boundaries?
