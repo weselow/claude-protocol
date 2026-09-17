@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 
 // hook-utils.cjs exports pure functions we can test directly
 const {
@@ -923,4 +923,118 @@ it('knows every hook the plugin ships', () => {
   });
 
   expect(leftoverProjectHooks(project).sort()).toEqual(shipped.sort());
+});
+
+// ---------------------------------------------------------------------------
+// execCommandAsync — for commands that should run side by side
+// ---------------------------------------------------------------------------
+// session-start asks bd four questions that each take seconds. Run one after
+// another they add up; run side by side they cost about the slowest one.
+
+const { execCommandAsync, execCommandJSONAsync, runHook } = require(utilsPath);
+
+// Every directory made from here on is removed once the file is done.
+const madeForAsync = [];
+function asyncTempDir(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  madeForAsync.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const dir of madeForAsync) {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
+describe('execCommandAsync', () => {
+  it('resolves with the trimmed output', async () => {
+    const out = await execCommandAsync(process.execPath, ['-e', 'console.log("  hello  ")']);
+    expect(out).toBe('hello');
+  });
+
+  it('resolves with null when the command fails', async () => {
+    expect(await execCommandAsync(process.execPath, ['-e', 'process.exit(3)'])).toBeNull();
+  });
+
+  it('resolves with null for a program that does not exist', async () => {
+    expect(await execCommandAsync('cp-no-such-tool-xyz', ['--version'])).toBeNull();
+  });
+
+  it('parses JSON output, and gives null for anything else', async () => {
+    const json = (text) => execCommandJSONAsync(process.execPath, ['-e', `console.log(${JSON.stringify(text)})`]);
+    expect(await json('[1, 2]')).toEqual([1, 2]);
+    expect(await json('not json')).toBeNull();
+  });
+
+  // The same wrapper handling as execCommand: bd and gh installed through npm
+  // are .cmd files, which cannot be spawned directly.
+  (onWindows ? it : it.skip)('runs a .cmd wrapper and keeps its arguments intact', async () => {
+    const dir = asyncTempDir('hu-async-wrapper-');
+    const printer = path.join(dir, 'argv-print.js');
+    fs.writeFileSync(printer, 'process.argv.slice(2).forEach((a, i) => console.log(i + "=<" + a + ">"));\n');
+    fs.writeFileSync(path.join(dir, 'cp-async-printer.cmd'),
+      `@echo off\r\n"${process.execPath}" "${printer}" %*\r\n`);
+    const env = { ...process.env, PATH: dir + path.delimiter + process.env.PATH };
+
+    const out = await execCommandAsync('cp-async-printer', ['two words', 'a^b', 'x&&echo PWNED'], { env });
+
+    expect(lines(out)).toEqual(['0=<two words>', '1=<a^b>', '2=<x&&echo PWNED>']);
+  });
+
+  // Behind a wrapper (a .cmd, or npm's bd launcher) the program runs as a
+  // grandchild and outlives the wrapper when that is stopped. Neither the
+  // answer nor this process may wait for it.
+  it('gives up at the time limit without waiting for the command to finish', () => {
+    const dir = asyncTempDir('hu-async-slow-');
+    const sleeper = path.join(dir, 'sleep.js');
+    fs.writeFileSync(sleeper, 'setTimeout(() => {}, 8000);\n');
+    let call = [process.execPath, [sleeper]];
+    if (onWindows) {
+      fs.writeFileSync(path.join(dir, 'cp-sleeper.cmd'), `@"${process.execPath}" "${sleeper}"\r\n`);
+      call = ['cp-sleeper', []];
+    }
+    const script = `require(${JSON.stringify(utilsPath)})`
+      + `.execCommandAsync(${JSON.stringify(call[0])}, ${JSON.stringify(call[1])}, { timeout: 500 })`
+      + '.then(out => process.stdout.write(String(out)));';
+
+    const started = Date.now();
+    const result = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      timeout: 20000,
+      env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH },
+    });
+
+    expect(result.stdout).toBe('null');
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+});
+
+describe('runHook with an asynchronous body', () => {
+  /** Run a body under runHook in its own process, with its error log. */
+  function runBody(body) {
+    const project = asyncTempDir('hu-async-hook-');
+    const script = `require(${JSON.stringify(utilsPath)}).runHook('probe', ${body});`;
+    const result = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      env: { ...process.env, CLAUDE_PROJECT_DIR: project, CLAUDE_PLUGIN_ROOT: '', CLAUDE_CONFIG_DIR: project },
+    });
+    const log = path.join(project, 'beads_orchestrator_errors.log');
+    return { ...result, log: fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '' };
+  }
+
+  it('logs a rejection the way it logs a throw, and exits 0', () => {
+    const result = runBody('async () => { await null; throw new Error("async boom"); }');
+
+    expect(result.status).toBe(0);
+    expect(result.log).toContain('[probe]');
+    expect(result.log).toContain('async boom');
+  });
+
+  it('lets the body finish writing before the process ends', () => {
+    const result = runBody(
+      'async () => { await new Promise(r => setTimeout(r, 300)); process.stdout.write("LATE"); }');
+
+    expect(result.stdout).toBe('LATE');
+    expect(result.log).toBe('');
+  });
 });

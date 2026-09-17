@@ -13,7 +13,7 @@
 
 'use strict';
 
-const { execFileSync } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -155,16 +155,61 @@ function quoteForCmdExe(arg) {
   return `"${escaped}"`;
 }
 
-/** Run a command through cmd.exe — the only way to reach a .cmd/.bat wrapper. */
-function runViaCmdExe(cmd, args, options) {
+/**
+ * The cmd.exe call that runs a command — the only way to reach a .cmd/.bat
+ * wrapper — as [file, args, options].
+ */
+function viaCmdExe(cmd, args, options) {
   // `/s` makes cmd.exe strip exactly the outermost pair of quotes and take the
   // rest literally, which is why the whole command goes inside one more pair.
   // windowsVerbatimArguments stops Node from re-quoting what is already quoted.
   const line = [cmd, ...args].map(quoteForCmdExe).join(' ');
-  return execFileSync('cmd.exe', ['/d', '/s', '/c', `"${line}"`], {
+  return ['cmd.exe', ['/d', '/s', '/c', `"${line}"`], {
     ...options,
     windowsVerbatimArguments: true,
-  });
+  }];
+}
+
+/** Run a command through cmd.exe and wait for it. */
+function runViaCmdExe(cmd, args, options) {
+  return execFileSync(...viaCmdExe(cmd, args, options));
+}
+
+/**
+ * True when Windows refused to start a program directly. ENOENT/EINVAL here
+ * means either "no such program" or "this program is a wrapper script". Only
+ * the second is recoverable, and the two are indistinguishable, so the caller
+ * retries through cmd.exe: a genuinely missing program fails again.
+ */
+function spawnRefused(err) {
+  return process.platform === 'win32' &&
+    (err.code === 'ENOENT' || err.code === 'EINVAL');
+}
+
+/** The options every external command runs with (see execCommand). */
+function commandOptions(opts) {
+  return {
+    encoding: 'utf8',
+    timeout: 10000,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    // Anchor to the project root, not the hook's inherited cwd. Without
+    // this, git/bd/gh answer about whatever directory the Bash tool last
+    // used — a worktree, a subdirectory, or a path outside the repo — and
+    // every check built on the answer silently passes. Callers may still
+    // override via opts.cwd.
+    cwd: getProjectDir(),
+    ...opts,
+  };
+}
+
+/** JSON.parse that answers null instead of throwing, and null for null. */
+function parseJSONOrNull(raw) {
+  if (raw == null) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -189,31 +234,15 @@ function runViaCmdExe(cmd, args, options) {
  * @returns {string|null}
  */
 function execCommand(cmd, args, opts) {
-  const options = {
-    encoding: 'utf8',
-    timeout: 10000,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    // Anchor to the project root, not the hook's inherited cwd. Without
-    // this, git/bd/gh answer about whatever directory the Bash tool last
-    // used — a worktree, a subdirectory, or a path outside the repo — and
-    // every check built on the answer silently passes. Callers may still
-    // override via opts.cwd.
-    cwd: getProjectDir(),
-    ...opts,
-  };
+  const options = commandOptions(opts);
   try {
     const direct = _needsCmdExe.has(cmd)
       ? runViaCmdExe(cmd, args, options)
       : execFileSync(cmd, args, options);
     return direct.trim();
   } catch (err) {
-    // ENOENT/EINVAL here means either "no such program" or "this program is a
-    // wrapper script". Only the second is recoverable, and the two are
-    // indistinguishable, so retry: a genuinely missing program fails again.
-    const mayBeWrapper = process.platform === 'win32' &&
-      !_needsCmdExe.has(cmd) &&
-      (err.code === 'ENOENT' || err.code === 'EINVAL');
-    if (!mayBeWrapper) return null;
+    // Already through cmd.exe: there is nothing left to retry with.
+    if (_needsCmdExe.has(cmd) || !spawnRefused(err)) return null;
     try {
       const viaShim = runViaCmdExe(cmd, args, options);
       _needsCmdExe.add(cmd);
@@ -228,13 +257,61 @@ function execCommand(cmd, args, opts) {
  * Run a command and parse its stdout as JSON, or return `null` on failure.
  */
 function execCommandJSON(cmd, args, opts) {
-  const raw = execCommand(cmd, args, opts);
-  if (raw == null) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  return parseJSONOrNull(execCommand(cmd, args, opts));
+}
+
+/**
+ * execCommand for commands that should run side by side: the same options,
+ * the same wrapper handling, and a promise of trimmed stdout or `null`. It
+ * never rejects.
+ */
+async function execCommandAsync(cmd, args, opts) {
+  const options = commandOptions(opts);
+  if (_needsCmdExe.has(cmd)) return (await settle(...viaCmdExe(cmd, args, options))).stdout;
+
+  const direct = await settle(cmd, args, options);
+  // Another call may have learned meanwhile that this is a wrapper; the
+  // retry is right either way.
+  if (!direct.error || !spawnRefused(direct.error)) return direct.stdout;
+  const viaShim = await settle(...viaCmdExe(cmd, args, options));
+  if (!viaShim.error) _needsCmdExe.add(cmd);
+  return viaShim.stdout;
+}
+
+/** execCommandAsync, with stdout parsed as JSON; `null` on any failure. */
+async function execCommandJSONAsync(cmd, args, opts) {
+  return parseJSONOrNull(await execCommandAsync(cmd, args, opts));
+}
+
+/**
+ * Start a program and resolve with { error, stdout } once it is done or its
+ * time is up.
+ *
+ * At the time limit execFile closes the output pipes before it stops the
+ * program, so a program that runs on as a grandchild — behind a .cmd wrapper,
+ * or behind npm's bd launcher, which starts the real bd as its own child —
+ * neither delays the answer nor keeps this process alive (measured on Windows
+ * and Linux).
+ */
+function settle(file, args, options) {
+  return new Promise((resolve) => {
+    const finish = (error, stdout) => {
+      resolve({ error, stdout: error ? null : String(stdout).trim() });
+    };
+    let child;
+    try {
+      child = execFile(file, args, options, finish);
+    } catch (err) {
+      // A .cmd started directly is refused on the spot (EINVAL), not later.
+      finish(err);
+      return;
+    }
+    // Nothing is ever written to it; closing it at once is what execFileSync
+    // does too. A program that is already gone can make that close fail with
+    // EPIPE, which says nothing about the answer.
+    child.stdin.on('error', () => {});
+    child.stdin.end();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -667,6 +744,10 @@ function logError(hookName, err) {
  * On unhandled exception: logs to beads_orchestrator_errors.log and exits 0
  * (fail open — hook error should not block the user).
  *
+ * The body may be async. Its rejection is handled the same way as a throw;
+ * otherwise nothing waits for it here, and the process ends on its own once
+ * the body is done and its output written.
+ *
  * Usage in each hook file:
  *   const { runHook } = require('./hook-utils.cjs');
  *   runHook('hook-name', () => { ... });
@@ -679,11 +760,15 @@ function runHook(hookName, fn) {
   // down. Silently: the plugin's session-start says the leftovers are there
   // and what removes them, and one voice saying it is enough.
   if (!isPluginInstall() && pluginActiveHere()) process.exit(0);
-  try {
-    fn();
-  } catch (err) {
+  const fail = (err) => {
     logError(hookName, err);
     process.exit(0);
+  };
+  try {
+    const result = fn();
+    if (result && typeof result.then === 'function') result.then(undefined, fail);
+  } catch (err) {
+    fail(err);
   }
 }
 
@@ -704,6 +789,8 @@ module.exports = {
   injectText,
   execCommand,
   execCommandJSON,
+  execCommandAsync,
+  execCommandJSONAsync,
   getRepoRoot,
   getCurrentBranch,
   getProjectDir,
