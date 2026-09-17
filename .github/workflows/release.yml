@@ -6,22 +6,10 @@ on:
       - 'v*'
 
 jobs:
+  # The same test run as every push to main and every pull request
+  # (test.yml): Ubuntu and Windows. publish waits for the whole matrix.
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-
-      - run: npm install
-      - run: npm test
-      - run: pip install pytest && python -m pytest tests/test_bootstrap.py -v
+    uses: ./.github/workflows/test.yml
 
   publish:
     needs: test

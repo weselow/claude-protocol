@@ -1,0 +1,74 @@
+name: Tests
+
+# The one definition of the test run, used two ways:
+# - on its own, for every push to main and every pull request, so a break is
+#   seen before a tag is pushed;
+# - from release.yml (workflow_call), so nothing is published unless the whole
+#   matrix passed.
+# workflow_dispatch runs it by hand on any branch:
+#   gh workflow run test.yml --ref <branch> --repo weselow/claude-protocol
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Windows as well as Linux: most users of the package are on Windows, and
+    # the tests for cmd.exe wrappers and other Windows paths skip elsewhere.
+    strategy:
+      # Let the other system finish when one fails: a break on one system
+      # only is exactly what this matrix is here to show.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    steps:
+      # The repository mixes CRLF and LF files and has no .gitattributes, and
+      # tests compare file contents byte for byte. Git for Windows is set up
+      # with core.autocrlf=true, which would turn every LF file into CRLF on
+      # checkout: bytes that neither a developer's checkout (autocrlf=false)
+      # nor the npm package (packed on Linux from the committed files) ever
+      # has. So the committed bytes are checked out on every system; on Linux
+      # this changes nothing.
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      # The Windows runner sets TEMP to the 8.3 short form
+      # C:\Users\RUNNER~1\AppData\Local\Temp. git reports the long form of the
+      # same directory, fs.realpathSync does not expand short names, and a test
+      # comparing the two fails. A developer's TEMP is the long form, and so is
+      # the job's own temp directory.
+      - name: Use a temp directory without 8.3 short names
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - run: npm install
+
+      # One line per test, so the log shows whether a Windows-only test ran
+      # or was skipped.
+      - run: npm test -- --reporter=verbose
+
+      - run: python -m pip install pytest
+
+      - run: python -m pytest tests/test_bootstrap.py -v -rs
