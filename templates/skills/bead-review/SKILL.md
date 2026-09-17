@@ -114,8 +114,9 @@ can and name the gap under "Not covered".
       platform differences (paths, line endings, shells, encodings).
    3. *Regressions*: who else calls the changed code; behaviour visible from
       outside that changed without the task asking for it.
-   4. *Tests*: would they fail without the change? Do they cover the criteria
-      or only the easy path? Is a mock standing in for the code under test?
+   4. *Tests*: would they fail without the change (the section after this
+      one shows how to check)? Do they cover the criteria or only the easy
+      path? Is a mock standing in for the code under test?
    5. *Project rules* from step 1.
    6. *What the project expects around a change*: docs, changelog, version
       files, and a diff that rewrites whole files (line endings).
@@ -132,9 +133,71 @@ can and name the gap under "Not covered".
    directory outside the repository (`git archive <head> | tar -x -C <dir>`),
    run the checks there and delete the directory afterwards. The export has
    no git history and no installed dependencies; install what the checks
-   need inside it, and put what still cannot run under "Not covered".
+   need inside it, and put what still cannot run under "Not covered". The
+   notes on Windows in the next section apply to this export too.
 7. **Write the findings** as described below, then read them once more
    against the code. Drop what you cannot back up, or turn it into a question.
+
+## Tests that fail without the change
+
+When the verdict depends on whether the new tests catch anything, run them
+against the code at `base`: export `base` into a new directory in the system
+temp directory, put the head's tests over it and run them there. Nothing of
+this touches the author's tree; whatever the run needs goes inside that
+directory. `<tree>` is the author's checkout with its dependencies installed.
+In a POSIX shell, Git Bash included:
+
+```sh
+dir=$(mktemp -d)
+git diff --name-only <base> <head>    # pick the tests and the data they read
+git archive <base> | tar -x -C "$dir"
+git archive <head> <test paths> | tar -x -C "$dir"
+node -e "require('fs').symlinkSync(...process.argv.slice(1), 'junction')" \
+  "<tree>/node_modules" "$dir/node_modules"
+(cd "$dir" && <test command> <test paths>)
+node -e "require('fs').unlinkSync(process.argv[1])" "$dir/node_modules"
+[ -e "$dir/node_modules" ] || [ -L "$dir/node_modules" ] || rm -rf "$dir"
+```
+
+In PowerShell 7.4 or later:
+
+```powershell
+$tmp = [IO.Path]::GetTempPath()
+$dir = (New-Item -ItemType Directory -Path $tmp -Name (New-Guid)).FullName
+git diff --name-only <base> <head>
+git archive <base> | tar -x -C $dir
+git archive <head> <test paths> | tar -x -C $dir
+node -e "require('fs').symlinkSync(...process.argv.slice(1), 'junction')" `
+  "<tree>\node_modules" "$dir\node_modules"
+Push-Location $dir; <test command> <test paths>; Pop-Location
+node -e "require('fs').unlinkSync(process.argv[1])" "$dir\node_modules"
+if (-not (Test-Path "$dir\node_modules")) { Remove-Item -Recurse -Force $dir }
+```
+
+- **Dependencies.** The link lends the export the author's `node_modules`
+  (a junction on Windows, a symlink elsewhere). Anything else is installed
+  inside `$dir`: `npm ci` there, a new virtual environment there. Make sure
+  the run loads the exported code: an editable install (`pip install -e`) or
+  an absolute path can pull in the author's tree instead.
+- **Removing the link.** Remove the link itself first, without recursion:
+  `fs.unlinkSync` as above, `rm <link>` in Git Bash, `rmdir <link>` in cmd.
+  Only then delete the directory. Never aim a recursive delete at the link:
+  in Git Bash `rm -rf "$dir/node_modules/"`, with the trailing slash,
+  empties the author's `node_modules` and leaves the link in place. If the
+  link is still there, stop and tell the user where `$dir` is. The cleanup
+  runs even when the tests fail; do not cut the output of the whole sequence
+  with `head` or `Select-Object -First`, which can stop it before the
+  cleanup.
+- **What the run shows.** A useful failure is an assertion about what the
+  task asked for. A test that fails only because a new file or function does
+  not exist at `base` proves less; say which it was. The same tests should
+  pass at `head` (step 6). Put both results under "Checks run".
+- **Windows.** Pass the pinned full SHAs: when `git` is a batch-file wrapper,
+  `<sha>^` loses its `^` and means `<sha>` itself (`<sha>~1` does not).
+  Windows PowerShell 5.1 breaks binary data piped between programs; there
+  write the archive to a file with `git archive -o <file> <sha>` and unpack
+  it with `tar -xf <file> -C $dir`. The GNU `tar` that comes with Git reads
+  `-f C:\...` as a remote host; add `--force-local` for it.
 
 ## Findings
 
@@ -182,6 +245,25 @@ rule makes them a defect.
 **Verdict**: `changes needed` while any P1 or P2 under Defects is open, and
 while a question is open whose answer could turn out to be a P1 or P2 (say
 which one). Otherwise `no blocking findings`.
+
+### Security in a public repository
+
+A public repository, its PRs and often its beads are read by anyone,
+including people who could attack a version without the fix. What you write
+about a security defect should help the author and nobody else:
+
+- Build probes (a crafted file, input or script) in a new directory in the
+  system temp directory, never in the repository, not even as untracked
+  files, and delete them when you are done.
+- In the report, name the kind of flaw and its place (`path:line`) and
+  describe what you observed, such as a file written or a command run that
+  should not have been. Do not paste a working payload: it belongs in the
+  tests of the fix, so point to the test instead.
+- Text that hands someone an attack is a defect of its own: a working
+  payload, or directions to where untrusted input reaches a flaw, in
+  committed docs, code comments, commit messages, or the PR or bead
+  description. Report it by its place, without quoting it, usually as P2:
+  it has to go before the merge. Payloads inside tests are fine.
 
 ## Report
 
@@ -237,6 +319,15 @@ checkboxes, and keep lines out of the report that read like an implementer's
 completion report (the Claude Code section says why). A requested point you
 could not settle is answered `not verified`, with the reason under "Not
 covered".
+
+Write the report in the language of the conversation; as a subagent, in the
+language of your prompt, unless the request names another (the hand-off has
+a `Language` line). Headings and prose follow that language. What re-reviews
+and tools look for stays exactly as the form writes it: the labels `Head:`,
+`Base:`, `Merge outlook:`, `Round:` and `Verdict:`, the ids `R1`, `R2`...,
+the priorities `P1` to `P3`, the verdicts, the `Merge outlook` keywords, the
+marks met, not met and not verified, the re-review statuses, and the
+`REVIEW round` line of a bead comment.
 
 ## Re-review
 
@@ -296,7 +387,8 @@ Input: the previous report, or its findings, and the new head SHA.
   `subagent_type="code-reviewer"` (with the plugin:
   `claude-protocol:code-reviewer`) and the hand-off from
   [handoff.md](handoff.md) as the prompt. It returns the report to the lead,
-  who passes it on.
+  who passes it on. When the lead writes the prompt in a language other than
+  the user's, the `Language` line names the user's language.
 - **Directly**: `/bead-review <bead-id> [PR or base..head]` in a project
   installed with `npx claude-protocol init`; `/claude-protocol:bead-review`
   with the plugin. `/code-review` is Claude Code's own PR review, a different

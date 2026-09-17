@@ -103,7 +103,8 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
   numbers on a re-review. The report also says whether the work still merges
   into the branch it goes to, answers the points the request asked to cover,
   and lists old defects the change only runs into separately, for a bead of
-  their own. `code-reviewer` now preloads the skill instead of
+  their own. It comes in the language of the conversation, with the ids and
+  keywords left in English. `code-reviewer` now preloads the skill instead of
   carrying a procedure of its own: it no longer demands DEMO blocks that no
   rule asked implementers to write, no longer pins `model: haiku`, and no
   longer assumes the diff is `main...bd-<id>`. Both install through `npx` and
@@ -561,7 +562,9 @@ re-review. Defects carry a priority and are kept apart from questions and
 optional suggestions, and each one cites `file:line` or a command with its
 output. The reviewer changes no code and posts to the PR or the bead only when
 asked. It never merges or closes anything: the user closes the bead after
-merging.
+merging. The report comes in the language of the conversation; the finding
+numbers, priorities, verdict and the other keywords stay in English, so that a
+re-review can match them.
 
 Requests that work:
 
