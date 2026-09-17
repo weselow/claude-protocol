@@ -96,7 +96,29 @@ function report({ worktree = WORKTREE, checklist = '- [x] the requirement' } = {
   return lines.join('\n');
 }
 
-function runHook(dir, fields = {}) {
+/**
+ * PATH holding a git that predates --path-format (2.31): it refuses that
+ * option and hands everything else to the real git. On Windows the wrapper is
+ * a .cmd, so the real git must not be on PATH at all, or it would be found first.
+ */
+function oldGitPath() {
+  const dir = tmp('validate-completion-oldgit-');
+  const win = process.platform === 'win32';
+  const real = spawnSync(win ? 'where' : 'which', ['git'], { encoding: 'utf8' }).stdout
+    .split(/\r?\n/).map(line => line.trim()).find(line => line && (!win || /\.exe$/i.test(line)));
+  if (win) {
+    fs.writeFileSync(path.join(dir, 'git.cmd'), ['@echo off',
+      'echo %* | findstr /C:"--path-format" >nul && exit /b 129',
+      `"${real}" %*`, ''].join('\r\n'));
+    return [dir, path.join(process.env.SystemRoot || 'C:\\Windows', 'System32')].join(path.delimiter);
+  }
+  const script = path.join(dir, 'git');
+  fs.writeFileSync(script, `#!/bin/sh\ncase "$*" in *--path-format*) exit 129;; esac\nexec "${real}" "$@"\n`);
+  fs.chmodSync(script, 0o755);
+  return `${dir}${path.delimiter}${process.env.PATH}`;
+}
+
+function runHook(dir, fields = {}, extraEnv = {}) {
   const input = {
     hook_event_name: 'SubagentStop',
     agent_type: 'general-purpose',
@@ -105,17 +127,20 @@ function runHook(dir, fields = {}) {
     last_assistant_message: report(),
     ...fields,
   };
+  const env = {
+    ...GIT_ENV,
+    CLAUDE_PROJECT_DIR: dir,
+    CLAUDE_PLUGIN_ROOT: '',
+    CLAUDE_CONFIG_DIR: tmp('validate-completion-claude-'),
+  };
+  // Windows spells it Path; two spellings in one environment is a coin toss.
+  if (extraEnv.PATH) for (const key of Object.keys(env)) if (/^path$/i.test(key)) delete env[key];
   const result = spawnSync(process.execPath, [HOOK_PATH], {
     cwd: dir,
     input: JSON.stringify(input),
     encoding: 'utf8',
     timeout: 30000,
-    env: {
-      ...GIT_ENV,
-      CLAUDE_PROJECT_DIR: dir,
-      CLAUDE_PLUGIN_ROOT: '',
-      CLAUDE_CONFIG_DIR: tmp('validate-completion-claude-'),
-    },
+    env: { ...env, ...extraEnv },
   });
   return JSON.parse(result.stdout);
 }
@@ -436,6 +461,21 @@ describe('validate-completion: the worktree', () => {
     const decision = runHook(dir);
     expect(decision.decision).toBe('block');
     expect(decision.reason).toContain('forgotten.txt');
+  });
+});
+
+describe('validate-completion: on a git older than --path-format', () => {
+  it('still blocks the main checkout', () => {
+    const { dir } = shared();
+    const decision = runHook(dir, { last_assistant_message: report({ worktree: '.' }) },
+      { PATH: oldGitPath() });
+    expect(decision.decision).toBe('block');
+    expect(decision.reason).toContain('main checkout');
+  });
+
+  it('still approves a linked worktree', () => {
+    const { dir } = shared();
+    expect(runHook(dir, {}, { PATH: oldGitPath() })).toEqual(APPROVE);
   });
 });
 

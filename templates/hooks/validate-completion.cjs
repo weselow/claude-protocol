@@ -223,10 +223,27 @@ function verifyLinkedWorktree(worktree) {
       `a worktree: ${worktree}\n\n${RETRY}`
     );
   }
-  const dirs = git(worktree, 'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir');
-  const [own, common] = (dirs || '').split(/\r?\n/);
-  if (own && own === common) {
+  if (isMainCheckout(worktree)) {
     block(`The path on the Worktree: line is the main checkout, not a bead worktree: ${worktree}\n\n${RETRY}`);
+  }
+}
+
+/**
+ * True for the top of the main checkout. A git without --path-format (older
+ * than 2.31) cannot say it that way; then the .git entry answers: a file in a
+ * linked worktree, a directory in the main checkout. Nothing readable counts
+ * as the main checkout — a check that cannot run must not pass.
+ */
+function isMainCheckout(worktree) {
+  const dirs = git(worktree, 'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir');
+  if (dirs) {
+    const [own, common] = dirs.split(/\r?\n/);
+    return own === common;
+  }
+  try {
+    return !fs.statSync(path.join(worktree, '.git')).isFile();
+  } catch {
+    return true;
   }
 }
 
