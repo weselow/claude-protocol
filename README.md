@@ -58,6 +58,8 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+### v3.10.0 (2026-09-17)
+
 - **Security fix: arguments passed to `.cmd` wrappers on Windows** — bd and gh
   installed through npm are `.cmd` wrappers, and the hooks can run those only
   through `cmd.exe`. The way arguments were quoted on that path did not hold
