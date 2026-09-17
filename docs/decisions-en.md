@@ -130,7 +130,13 @@ Every decision made during the v2 → v3 rewrite. Context, alternatives, rationa
 1. Re-read `bd show {ID}` — compare description with results
 2. Include `Checklist:` section in completion report with `[x]` marks
 
-**Enforcement:** Hook `validate-completion.cjs` (SubagentStop) reads the subagent's last message. If it is a completion report (`BEAD {ID} COMPLETE`), the subagent is sent back — in every permission mode, `bypassPermissions` included — when `Checklist:` is missing or has an unchecked `[ ]` item, when the `Worktree:` line names no existing directory, when that worktree has uncommitted changes, or when its branch is not on origin at the worktree's commit. No origin, or one that cannot be reached, skips the last check. A second stop (`stop_hook_active`) is let through, so the hook never argues in a loop.
+**Enforcement:** Hook `validate-completion.cjs` (SubagentStop) reads the subagent's last message. A line starting with `BEAD {ID} COMPLETE` (a heading mark or bold in front is fine) makes it a completion report, and the subagent is sent back — in every permission mode, `bypassPermissions` included — when:
+- there is no `Checklist:`, it has no items, or one of its items is unchecked (`- [ ]`, `* [ ]`, `+ [ ]`, `1. [ ]`); open items outside the checklist do not count
+- the `Worktree:` line names no existing git worktree (the path may be quoted, followed by a note, on the next line, or written Git Bash style on Windows)
+- that worktree has uncommitted changes
+- with an origin: the worktree is on a detached HEAD, or its branch is not on origin at the worktree's commit
+
+An origin that cannot be reached skips the last check. A second stop (`stop_hook_active`) is let through, so the hook never argues in a loop.
 
 **Why:** Without this, Claude often says "done" having completed 3 of 5 items. Especially after compaction.
 

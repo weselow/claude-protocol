@@ -477,10 +477,10 @@ git checkout -b fix-typo     # must be off main
 
 ### Completion verification
 
-A subagent that ends with a completion report (`BEAD {ID} COMPLETE`) is sent
-back to work, in every permission mode, unless:
-- `Checklist:` section present with all `[x]` items checked
-- the `Worktree:` line names an existing directory
+A subagent whose last message has a line starting with `BEAD {ID} COMPLETE` is
+sent back to work, in every permission mode, unless:
+- the `Checklist:` section has items and every one is `[x]`
+- the `Worktree:` line names an existing git worktree
 - that worktree has nothing uncommitted
 - its branch is on origin at the worktree's commit (skipped when there is no
   origin or it cannot be reached)
