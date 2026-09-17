@@ -109,12 +109,11 @@ function approve() {
 }
 
 function block(reason) {
-  // In bypass mode, convert block to approve with warning
-  if (_permissionMode === 'bypassPermissions') {
-    process.stdout.write(`[HOOK WARNING — would block] ${reason}\n`);
-    approve(); // approve() calls process.exit(0)
-    return;    // unreachable, but signals intent to readers
-  }
+  // Blocks in every permission mode, bypassPermissions included. Unlike
+  // deny(), there is no warning to fall back to: a SubagentStop hook that
+  // exits 0 with plain text is never seen by the model — the text lands in the
+  // subagent's transcript after it has finished. Measured: 266 such warnings,
+  // not one of them read.
   const out = { decision: 'block', reason };
   process.stdout.write(JSON.stringify(out));
   process.exit(0);

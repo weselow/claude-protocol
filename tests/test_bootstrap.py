@@ -1663,7 +1663,7 @@ RULES_RU = TEMPLATES_DIR / "rules-ru"
 
 # validate-completion.cjs matches these literally in a subagent's final report.
 # A translation that localises them would block every completed task.
-REPORT_MARKERS = ["BEAD {BEAD_ID} COMPLETE", "Checklist:"]
+REPORT_MARKERS = ["BEAD {BEAD_ID} COMPLETE", "Worktree:", "Checklist:"]
 
 
 def _cyrillic(text):

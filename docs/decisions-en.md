@@ -117,14 +117,12 @@ Every decision made during the v2 → v3 rewrite. Context, alternatives, rationa
 
 **Decision:**
 - `open` → created
-- `in_progress` → work started
-- `inreview` → submitted for review (enforced by validate-completion hook)
-- `done` → closed
+- `in_progress` → work started; stays so after submission, which an `AWAITING REVIEW` comment marks
+- `done` → closed by the user after the merge
 
 **Enforcement:**
-- `inreview` on completion — hook blocks subagent if not set
-- `in_progress` on start — instruction only (no enforcement, bd doesn't store status history)
-- Close after merge — `session-start.cjs` shows ACTION REQUIRED for merged worktrees and beads in `inreview`
+- Status — instruction only (bd doesn't store status history, and the completion hook does not read the status)
+- Close after merge — `session-start.cjs` shows ACTION REQUIRED for merged worktrees whose bead is still open
 
 ### 3.5 Checklist verification on completion
 
@@ -132,7 +130,13 @@ Every decision made during the v2 → v3 rewrite. Context, alternatives, rationa
 1. Re-read `bd show {ID}` — compare description with results
 2. Include `Checklist:` section in completion report with `[x]` marks
 
-**Enforcement:** Hook `validate-completion.cjs` blocks if no `Checklist:` or unchecked `[ ]` items.
+**Enforcement:** Hook `validate-completion.cjs` (SubagentStop) reads the subagent's last message. A line that starts with `BEAD <id> COMPLETE` makes it a completion report. Anything but letters and digits may stand in front of the marker and between its parts (a heading mark, bold, a backtick, an emoji, a quote mark, a colon or dash); a marker inside a sentence, or with a placeholder id such as `{BEAD_ID}`, does not count. The subagent is then sent back — in every permission mode, `bypassPermissions` included — when:
+- there is no `Checklist:`, it has no items, or one of its items is unchecked (`- [ ]`, `* [ ]`, `+ [ ]`, `1. [ ]`); the checklist runs to the next report label (`Files:`, `Tests:`, `Summary:`, `Found along the way:`, or any label with text after it) or a closing code fence, so open items after it do not count; `[x]`, `[✅]`, `[✔️]` and `- ✅` count as ticked
+- the `Worktree:` line (looked for below the marker, then above it) does not name the top directory of a linked git worktree: a plain directory, a subdirectory and the main checkout all block. The path may be quoted, followed by a note, on the next line, or written Git Bash style on Windows; an unquoted path with a space is not read
+- that worktree has uncommitted changes, or git cannot read its status
+- with an origin: the worktree is on a detached HEAD, or its branch is not on origin at the worktree's commit
+
+An origin that cannot be reached skips the last check. A second stop (`stop_hook_active`) is let through, so the hook never argues in a loop.
 
 **Why:** Without this, Claude often says "done" having completed 3 of 5 items. Especially after compaction.
 
