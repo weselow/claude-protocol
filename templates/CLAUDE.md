@@ -45,6 +45,15 @@ already found instead of rediscovering it.
 **Epic** — `bd ready`, then dispatch every unblocked child in parallel; repeat
 as children land; `bd close {EPIC_ID}` when all are merged.
 
+**Dispatch size** — one agent gets one reviewable piece. A task that spans a new
+page, shared code, a conflict or merge flow and a mobile layout is an epic of
+3–4 beads, one agent each — never one agent for all of it.
+
+**Review rounds** — fixes after the first review go to a fresh agent with a
+short brief: what is done, the open R-findings, the branch and worktree. Not
+SendMessage to the same agent: its context only grows with each round. After
+2–3 rounds the final pass goes to a fresh reviewer too.
+
 **Quick fix** (<10 lines) — branch off main first
 (`git checkout -b quick-fix-description`), implement, commit. Never on main.
 
