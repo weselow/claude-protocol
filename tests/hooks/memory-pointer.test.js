@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import { spawnSync, execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -6,8 +6,18 @@ import path from 'path';
 
 const HOOK_PATH = path.resolve(__dirname, '../../templates/hooks/memory-pointer.cjs');
 
+// Every temporary directory made here is removed once the file is done.
+const madeHere = [];
+afterAll(() => {
+  for (const dir of madeHere) {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  }
+});
+
 function tempDir(prefix) {
-  return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  madeHere.push(dir);
+  return dir;
 }
 
 function git(cwd, ...args) {
@@ -22,19 +32,19 @@ function repo() {
   return dir;
 }
 
-function withProjectMemory(dir) {
+function withProjectMemory(dir, text = '- [a](a.md) — a fact\n') {
   fs.mkdirSync(path.join(dir, '.memory'), { recursive: true });
-  fs.writeFileSync(path.join(dir, '.memory', 'MEMORY.md'), '- [a](a.md) — a fact\n');
+  fs.writeFileSync(path.join(dir, '.memory', 'MEMORY.md'), text);
   return path.join(dir, '.memory', 'MEMORY.md');
 }
 
 /** A Claude config folder, with shared memory set up when `choice` is given. */
-function configDir({ choice, withIndex = true } = {}) {
+function configDir({ choice, withIndex = true, indexText = '- shared fact\n' } = {}) {
   const dir = tempDir('memory-pointer-cfg-');
   if (!choice) return { dir };
   const shared = path.join(dir, 'shared-memory');
   fs.mkdirSync(shared, { recursive: true });
-  if (withIndex) fs.writeFileSync(path.join(shared, 'MEMORY.md'), '- shared fact\n');
+  if (withIndex) fs.writeFileSync(path.join(shared, 'MEMORY.md'), indexText);
   fs.writeFileSync(path.join(dir, 'claude-protocol.json'), JSON.stringify({
     shared_memory: choice === 'never' ? { choice } : { choice, path: shared, remote: null },
   }));
@@ -76,6 +86,18 @@ describe('memory-pointer (SubagentStart)', () => {
 
   it('says nothing when the shared folder has no index yet', () => {
     expect(pointer(runHook(repo(), configDir({ choice: 'local', withIndex: false })))).toBeNull();
+  });
+
+  // bootstrap creates the shared MEMORY.md empty: a pointer to it is noise.
+  it('says nothing when the shared index is empty', () => {
+    expect(pointer(runHook(repo(), configDir({ choice: 'new', indexText: '' })))).toBeNull();
+  });
+
+  it('says nothing when the project index holds only whitespace', () => {
+    const dir = repo();
+    withProjectMemory(dir, ' \r\n\n\t\n');
+
+    expect(pointer(runHook(dir, configDir()))).toBeNull();
   });
 
   it('points at the project memory alone', () => {
@@ -122,7 +144,7 @@ describe('memory-pointer (SubagentStart)', () => {
     expect(line).toContain(index);
   });
 
-  it('says nothing outside git, and does not fail', () => {
+  it('outside git, points at the folder\'s own .memory', () => {
     const dir = tempDir('memory-pointer-nogit-');
     withProjectMemory(dir);
 

@@ -973,17 +973,42 @@ function mainCheckoutRoot(dir) {
   return path.basename(gitDir) === '.git' ? path.dirname(gitDir) : dir;
 }
 
-/** <main checkout>/.memory/MEMORY.md when it exists, or null. */
-function projectMemoryIndex(projectDir) {
-  const index = path.join(mainCheckoutRoot(projectDir), '.memory', 'MEMORY.md');
-  return fs.existsSync(index) ? index : null;
+/**
+ * The index when it holds something. bootstrap creates the shared MEMORY.md
+ * empty, and a pointer to an empty file sends an agent to read nothing.
+ */
+function nonEmptyIndex(index) {
+  try {
+    return fs.readFileSync(index, 'utf8').trim() ? index : null;
+  } catch {
+    return null;
+  }
 }
 
-/** <shared memory>/MEMORY.md when it exists, or null. */
+/** <main checkout>/.memory/MEMORY.md when it has something in it, or null. */
+function projectMemoryIndex(projectDir) {
+  return nonEmptyIndex(path.join(mainCheckoutRoot(projectDir), '.memory', 'MEMORY.md'));
+}
+
+/** <shared memory>/MEMORY.md when it has something in it, or null. */
 function sharedMemoryIndex() {
   const dir = sharedMemoryDir();
-  const index = dir && path.join(dir, 'MEMORY.md');
-  return index && fs.existsSync(index) ? index : null;
+  return dir ? nonEmptyIndex(path.join(dir, 'MEMORY.md')) : null;
+}
+
+/**
+ * `env` for a git that talks to a remote with nobody to answer it: no
+ * terminal prompt, no Git Credential Manager window, no ssh password or
+ * host-key question. An ssh command the user chose — GIT_SSH_COMMAND, GIT_SSH,
+ * or core.sshCommand in the repository (`sshCommandConfigured`) — is left in
+ * charge: GIT_SSH_COMMAND would override it, and with it the key it names.
+ */
+function quietGitEnv(env, sshCommandConfigured) {
+  const quiet = { ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
+  if (!env.GIT_SSH_COMMAND && !env.GIT_SSH && !sshCommandConfigured) {
+    quiet.GIT_SSH_COMMAND = 'ssh -o BatchMode=yes';
+  }
+  return quiet;
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,4 +1053,5 @@ module.exports = {
   mainCheckoutRoot,
   projectMemoryIndex,
   sharedMemoryIndex,
+  quietGitEnv,
 };

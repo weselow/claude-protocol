@@ -860,6 +860,36 @@ describe('session-start updating the shared memory', SLOW, () => {
     expect(memoryWarning(result.stdout)).toEqual([]);
   });
 
+  it('in a project with beads, the pull warning comes first', () => {
+    const memory = sharedMemory();
+    git(memory.shared, 'remote', 'set-url', 'origin', path.join(memory.config, 'gone.git'));
+
+    const result = runHook(project(), { CLAUDE_CONFIG_DIR: memory.config });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.split('\n')[0]).toMatch(/shared memory/i);
+    expect(memoryWarning(result.stdout)).toHaveLength(1);
+  });
+
+  it('keeps the ssh command the user set', () => {
+    const memory = sharedMemory();
+    git(memory.shared, 'remote', 'set-url', 'origin', 'ssh://git@example.invalid/memory.git');
+    // A stand-in for ssh: leaves a mark and fails, so nothing goes on the network.
+    const fakeSsh = path.join(memory.config, 'fake-ssh.js');
+    const mark = path.join(memory.config, 'ssh-was-called');
+    fs.writeFileSync(fakeSsh, `require('fs').writeFileSync(${JSON.stringify(mark)}, 'x'); process.exit(255);\n`);
+    const slash = (p) => p.replace(/\\/g, '/');
+
+    const result = runHook(plainProject(), {
+      CLAUDE_CONFIG_DIR: memory.config,
+      GIT_SSH_COMMAND: `"${slash(process.execPath)}" "${slash(fakeSsh)}"`,
+    });
+
+    expect(result.status).toBe(0);
+    expect(fs.existsSync(mark)).toBe(true);
+    expect(memoryWarning(result.stdout)).toHaveLength(1);
+  });
+
   it('pulls in a project with beads too', () => {
     const memory = sharedMemory();
     memory.pushFromOther('- first\n- third\n');

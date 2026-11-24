@@ -16,7 +16,7 @@ const {
   injectText, execCommand, execCommandJSON, execCommandJSONAsync, getProjectDir, runHook,
   parseBdVersion, versionBelow, BD_MIN_VERSION,
   hasBeads, isPluginInstall, readOwnVersion, updateNotice,
-  leftoverProjectHooks, execCommandAsync, sharedMemoryDir,
+  leftoverProjectHooks, execCommandAsync, sharedMemoryDir, quietGitEnv,
 } = require('./hook-utils.cjs');
 
 // Up here, not with the functions using them: the hook body below starts
@@ -61,7 +61,7 @@ runHook('session-start', async () => {
   }
 
   const projectDir = getProjectDir();
-  const output = [...await memoryPull];
+  const output = [];
   const repoRoot = execCommand('git', ['-C', projectDir, 'rev-parse', '--show-toplevel']);
 
   collectDoubleInstall(projectDir, output);
@@ -76,7 +76,9 @@ runHook('session-start', async () => {
   collectOpenPrs(repoRoot, output);
   reportTaskLists(await taskLists, output);
 
-  injectText(output.join('\n') + '\n');
+  // Awaited last: the pull has been running all along, and its warning, if
+  // any, still goes first.
+  injectText([...await memoryPull, ...output].join('\n') + '\n');
 });
 
 // ---------------------------------------------------------------------------
@@ -93,17 +95,25 @@ function injectLines(lines) {
  * was nothing to do, one warning when it failed — no network, or local
  * commits a fast-forward cannot get past. It never waits beyond PULL_TIMEOUT
  * and never asks for a password: there is nobody to answer at a hook.
+ *
+ * Not async on purpose: the local questions are asked synchronously and the
+ * pull is spawned before this returns. Asked through promises, the pull
+ * would start only once the event loop is free — after the synchronous
+ * checks it is meant to run beside.
  */
-async function pullSharedMemory() {
+function pullSharedMemory() {
   const dir = sharedMemoryDir();
-  if (!dir || !fs.existsSync(path.join(dir, '.git'))) return [];
-  const git = (args) => execCommandAsync('git', ['-C', dir, ...args], {
-    cwd: dir, timeout: PULL_TIMEOUT, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-  });
+  if (!dir || !fs.existsSync(path.join(dir, '.git'))) return Promise.resolve([]);
+  const git = (args) => execCommand('git', ['-C', dir, ...args], { cwd: dir });
   // A folder made with no remote, or one never pushed, has no upstream.
-  const upstream = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
-  if (!upstream) return [];
-  if (await git(['pull', '--ff-only', '--quiet']) !== null) return [];
+  if (!git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])) return Promise.resolve([]);
+  const env = quietGitEnv(process.env, Boolean(git(['config', '--get', 'core.sshCommand'])));
+  return execCommandAsync('git', ['-C', dir, 'pull', '--ff-only', '--quiet'], {
+    cwd: dir, timeout: PULL_TIMEOUT, env,
+  }).then(out => (out !== null ? [] : pullWarning(dir)));
+}
+
+function pullWarning(dir) {
   return [
     `WARNING: shared memory not updated — git pull --ff-only failed in ${dir} (no network, or local commits in the way).`,
     '',
