@@ -59,6 +59,7 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 ### Unreleased
 
 - **Shared memory, one per machine** — init and upgrade ask once: connect an existing repository, create a private `<login>/claude-memory` with gh, use a local folder without git, or not now (remembered). The folder is `~/.claude/shared-memory` (`CLAUDE_CONFIG_DIR` respected); a marked block in `~/.claude/CLAUDE.md` says which memory to write to and loads its `MEMORY.md`. Nothing outside the markers is touched, and the file is backed up to `~/.claude/claude-protocol-backups/` before each change. Runs nobody can answer (`--all`, CI, the plugin's `/claude-protocol:init`) ask nothing and print the flag instead: `--shared-memory existing <url> | new | local | never`.
+- **Rules send lessons to project and shared memory, not to bd** — `debugging-standard`, `pre-code-workflow` and `beads-workflow` now say "search project memory (`.memory/`) and shared memory" and "record the lesson by the route rule" instead of `bd memories` / `bd remember`; the worklog table gets two rows, project memory and shared. bd's memory is not wiped and stays as a backup. A finding filed along the way is now linked to its bead with `--deps discovered-from:<bead>`, so it can be searched by. The bd 1.1.0 minimum stays, for `bd worktree` and `bd prime`.
 - **Upgrade removes `bd prime` from `.claude/settings.json` too** — before, only `settings.local.json` was cleaned; the hook dumps all of bd's memory, which Claude Code cuts to 2,000 characters anyway.
 
 ### v3.10.0 (2026-09-17)
@@ -406,8 +407,8 @@ directory is not on this shell's PATH, so open a new terminal and try again.
 
 **When `bd` is older than 1.1.0**, the installer warns and keeps going, and the
 session-start hook repeats the warning once per session. Nothing is updated for
-you — the rules need `bd memories`, `bd remember`, `bd worktree` and `bd prime`,
-and an old `bd` fails those one at a time with no explanation.
+you — the rules need `bd worktree` and `bd prime`, and an old `bd` fails those
+one at a time with no explanation.
 
 ### Install as a plugin
 

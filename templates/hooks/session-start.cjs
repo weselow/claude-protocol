@@ -97,7 +97,7 @@ function collectOutdatedBd(output) {
   if (!versionBelow(found, BD_MIN_VERSION)) return;
 
   output.push(`WARNING: bd ${found} is older than ${BD_MIN_VERSION}, which the rules rely on`);
-  output.push('   (bd memories, bd remember, bd worktree, bd prime).');
+  output.push('   (bd worktree, bd prime).');
   output.push('   Update it: npm install -g @beads/bd@latest');
   output.push('');
 }

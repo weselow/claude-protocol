@@ -33,8 +33,11 @@ apart from the main change.
 - you would have to drop the current work to understand the cause
 
 ```bash
-bd create "Fix: [what]" -d "Discovered while working on {CURRENT_BEAD}: [details]"
+bd create "Fix: [what]" -d "[details]" --deps discovered-from:{CURRENT_BEAD}
 ```
+
+The `discovered-from` link, not just words in the description, ties the
+finding to the bead it came from — it can be searched by.
 
 Never leave it silent: either the change is in a commit, or there is a bead.
 
@@ -75,7 +78,8 @@ child is done. Never leave a bead `in_progress` across sessions without a reason
    ```
    It shares the main repo's database — labels like `none` or
    `local (no redirect)` are cosmetic, not breakage. Anything odd around
-   worktrees and bd: `bd memories worktree` before investigating.
+   worktrees and bd: search project and shared memory for "worktree" before
+   investigating.
 3. `bd update {BEAD_ID} --status in_progress` — and the parent epic too, if it
    is still `open`
 4. Read the context you were given: `bd show {BEAD_ID}` and `bd comments {BEAD_ID}`
