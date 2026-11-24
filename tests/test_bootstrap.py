@@ -3995,7 +3995,6 @@ class TestBothSidesReadTheRegistryTheSameWay:
             assert node_says == str(expected).lower(), f"node, {name}"
 
 
-
 # ============================================================================
 # Project memory moves into <project>/.memory
 # ============================================================================
@@ -4372,3 +4371,396 @@ class TestProjectMemorySettingEncoding:
         raw = (project / ".claude" / "settings.local.json").read_bytes()
         assert "\u043f\u0440\u043e\u0435\u043a\u0442".encode("utf-8") in raw
         assert b"\\u043f" not in raw
+
+
+# ============================================================================
+# Shared memory — one per machine, in the user's Claude config folder
+# ============================================================================
+# tests/conftest.py points CLAUDE_CONFIG_DIR at a temporary folder for every
+# test; these tests use their own so they can look inside it. gh and git never
+# run: _FakeTools answers for them and records what was asked.
+
+
+class _FakeTools:
+    """gh and git, as far as the shared-memory setup needs them."""
+
+    def __init__(self, monkeypatch, login="octo", fail=None):
+        self.calls = []
+        self.login = login
+        self.fail = fail or set()
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: f"/bin/{name}")
+        monkeypatch.setattr(bootstrap.subprocess, "run", self.run)
+
+    def run(self, cmd, **kwargs):
+        cmd = [str(c) for c in cmd]
+        self.calls.append(cmd)
+        # git -C <dir> commit ... fails as "git commit"
+        short = cmd[:1] + cmd[3:] if cmd[:2] == ["git", "-C"] else cmd
+        key = " ".join(short[:3])
+        if any(key.startswith(f) for f in self.fail):
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        if cmd[:3] == ["gh", "api", "user"]:
+            return SimpleNamespace(returncode=0, stdout=self.login + "\n", stderr="")
+        if cmd[:3] == ["gh", "repo", "clone"] or cmd[:2] == ["git", "clone"]:
+            (Path(cmd[-1]) / ".git").mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def ran(self, *prefix):
+        return [c for c in self.calls if c[:len(prefix)] == list(prefix)]
+
+
+@pytest.fixture
+def config(tmp_path, monkeypatch):
+    folder = tmp_path / "claude-config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(folder))
+    return folder
+
+
+def _setup(flag=None, *, interactive=False, dry_run=False, lang=None,
+           default_lang=None):
+    return bootstrap.setup_shared_memory(
+        flag, lang=lang, default_lang=default_lang,
+        interactive=interactive, dry_run=dry_run)
+
+
+def _state(config):
+    return json.loads((config / "claude-protocol.json").read_text(encoding="utf-8"))
+
+
+def _answers(monkeypatch, *answers):
+    queue = list(answers)
+    asked = []
+
+    def fake_input(prompt=""):
+        asked.append(prompt)
+        return queue.pop(0)
+    monkeypatch.setattr("builtins.input", fake_input)
+    return asked
+
+
+class TestSharedMemoryFlagParsing:
+    @pytest.mark.parametrize("values, expected", [
+        (["new"], ("new", None)),
+        (["local"], ("local", None)),
+        (["never"], ("never", None)),
+        (["existing", "git@github.com:me/mem.git"],
+         ("existing", "git@github.com:me/mem.git")),
+    ])
+    def test_valid(self, values, expected):
+        assert bootstrap.parse_shared_memory_flag(values) == expected
+
+    @pytest.mark.parametrize("values", [
+        ["existing"], ["new", "extra"], ["sometimes"], ["local", "x"],
+    ])
+    def test_invalid(self, values):
+        with pytest.raises(ValueError):
+            bootstrap.parse_shared_memory_flag(values)
+
+    def test_argparse_rejects_existing_without_url(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--project-dir",
+                                          str(tmp_path), "--shared-memory", "existing"])
+        with pytest.raises(SystemExit) as exc:
+            bootstrap.main()
+        assert exc.value.code == 2
+
+
+class TestSharedMemoryEachChoice:
+    """Each of the four answers, given as the flag."""
+
+    def test_new_creates_private_repo_and_clones_it(self, config, monkeypatch):
+        tools = _FakeTools(monkeypatch)
+        assert _setup(("new", None)) == 0
+        dest = config / "shared-memory"
+        assert tools.ran("gh", "repo", "create") == [
+            ["gh", "repo", "create", "octo/claude-memory", "--private"]]
+        assert tools.ran("gh", "repo", "clone")[0][-1] == str(dest)
+        assert (dest / "MEMORY.md").read_text(encoding="utf-8") == ""
+        assert len((dest / "README.md").read_text(encoding="utf-8").splitlines()) == 1
+        assert tools.ran("git", "-C", str(dest), "push")
+        state = _state(config)["shared_memory"]
+        assert state["choice"] == "new" and state["path"] == str(dest)
+        assert state["remote"] == "octo/claude-memory"
+        assert "MEMORY.md" in (config / "CLAUDE.md").read_text(encoding="utf-8")
+
+    def test_existing_clones_the_given_url(self, config, monkeypatch):
+        tools = _FakeTools(monkeypatch)
+        assert _setup(("existing", "https://example.test/me/mem.git")) == 0
+        dest = config / "shared-memory"
+        assert tools.ran("git", "clone") == [
+            ["git", "clone", "https://example.test/me/mem.git", str(dest)]]
+        assert not tools.ran("gh")
+        assert _state(config)["shared_memory"]["choice"] == "existing"
+        assert (dest / "MEMORY.md").exists()
+
+    def test_local_makes_a_folder_without_git(self, config, monkeypatch):
+        tools = _FakeTools(monkeypatch)
+        assert _setup(("local", None)) == 0
+        dest = config / "shared-memory"
+        assert (dest / "MEMORY.md").exists() and not (dest / ".git").exists()
+        assert tools.calls == []
+        assert _state(config)["shared_memory"]["choice"] == "local"
+        assert "MEMORY.md" in (config / "CLAUDE.md").read_text(encoding="utf-8")
+
+    def test_never_is_remembered_and_writes_no_block(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        assert _setup(("never", None)) == 0
+        assert _state(config)["shared_memory"]["choice"] == "never"
+        assert not (config / "CLAUDE.md").exists()
+        asked = _answers(monkeypatch)
+        assert _setup(None, interactive=True) == 0
+        assert asked == [], "a remembered 'not now' asked again"
+
+    def test_failed_create_remembers_nothing(self, config, monkeypatch, capsys):
+        _FakeTools(monkeypatch, fail={"gh repo create"})
+        assert _setup(("new", None)) == 1
+        assert not (config / "claude-protocol.json").exists()
+        assert not (config / "CLAUDE.md").exists()
+        assert "--shared-memory" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("step", ["git commit", "git push"])
+    def test_new_that_cannot_commit_or_push_is_set_up_not_pushed(
+            self, config, monkeypatch, capsys, step):
+        """R1: the repository and the clone exist by then — remember them, so a
+        second run does not stop on a folder that is no longer empty."""
+        tools = _FakeTools(monkeypatch, fail={step})
+        assert _setup(("new", None)) == 0
+        dest = config / "shared-memory"
+        state = _state(config)["shared_memory"]
+        assert state["choice"] == "new" and state["path"] == str(dest)
+        assert state["remote"] == "octo/claude-memory"
+        assert "MEMORY.md" in (config / "CLAUDE.md").read_text(encoding="utf-8")
+        out = capsys.readouterr().out
+        assert "WARNING" in out and step.split()[1] in out and str(dest) in out
+        if step == "git commit":
+            assert not tools.ran("git", "-C", str(dest), "push")
+        tools.calls.clear()
+        assert _setup(None) == 0, "a second run stopped on the half-done setup"
+        assert not tools.ran("gh") and not tools.ran("git", "clone")
+
+    def test_a_folder_already_there_that_is_not_ours_stops_it(self, config, monkeypatch):
+        tools = _FakeTools(monkeypatch)
+        (config / "shared-memory").mkdir(parents=True)
+        (config / "shared-memory" / "notes.txt").write_text("mine", encoding="utf-8")
+        assert _setup(("existing", "https://example.test/x.git")) == 1
+        assert not tools.ran("git", "clone")
+        assert (config / "shared-memory" / "notes.txt").read_text(encoding="utf-8") == "mine"
+
+
+class TestSharedMemoryQuestion:
+    """The same four answers, typed by a person."""
+
+    def test_answer_1_asks_for_the_url(self, config, monkeypatch):
+        tools = _FakeTools(monkeypatch)
+        _answers(monkeypatch, "1", "https://example.test/me/mem.git")
+        assert _setup(None, interactive=True) == 0
+        assert tools.ran("git", "clone")
+        assert _state(config)["shared_memory"]["choice"] == "existing"
+
+    def test_answer_2_creates(self, config, monkeypatch):
+        tools = _FakeTools(monkeypatch)
+        _answers(monkeypatch, "2")
+        assert _setup(None, interactive=True) == 0
+        assert tools.ran("gh", "repo", "create")
+        assert _state(config)["shared_memory"]["choice"] == "new"
+
+    def test_answer_3_local(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        _answers(monkeypatch, "3")
+        assert _setup(None, interactive=True) == 0
+        assert _state(config)["shared_memory"]["choice"] == "local"
+
+    def test_answer_4_never(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        _answers(monkeypatch, "4")
+        assert _setup(None, interactive=True) == 0
+        assert _state(config)["shared_memory"]["choice"] == "never"
+
+    def test_no_answer_remembers_nothing(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        _answers(monkeypatch, "")
+        assert _setup(None, interactive=True) == 0
+        assert not (config / "claude-protocol.json").exists()
+
+    def test_stdin_that_cannot_be_read_is_no_answer(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+
+        def closed(prompt=""):
+            raise EOFError
+        monkeypatch.setattr("builtins.input", closed)
+        assert _setup(None, interactive=True) == 0
+        assert not (config / "claude-protocol.json").exists()
+
+    def test_set_up_once_per_machine(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        _answers(monkeypatch, "3")
+        _setup(None, interactive=True)
+        asked = _answers(monkeypatch)
+        assert _setup(None, interactive=True) == 0
+        assert asked == []
+
+
+class TestSharedMemoryNobodyToAsk:
+    def test_prints_one_hint_line_and_asks_nothing(self, config, monkeypatch, capsys):
+        tools = _FakeTools(monkeypatch)
+        asked = _answers(monkeypatch)
+        assert _setup(None, interactive=False) == 0
+        out = capsys.readouterr().out
+        hint = [line for line in out.splitlines() if "--shared-memory" in line]
+        assert len(hint) == 1
+        assert asked == [] and tools.calls == []
+        assert not config.exists()
+
+    def test_batch_upgrade_does_not_ask_even_on_a_terminal(self, tmp_path, config,
+                                                         monkeypatch, capsys):
+        _FakeTools(monkeypatch)
+        monkeypatch.setattr(bootstrap, "_stdin_is_a_person", lambda: True)
+        asked = _answers(monkeypatch)
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--all", str(parent)])
+        with pytest.raises(SystemExit) as exc:
+            bootstrap.main()
+        assert exc.value.code == 0
+        assert asked == []
+        assert "--shared-memory" in capsys.readouterr().out
+
+    def test_flag_works_without_a_person(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        assert _setup(("local", None), interactive=False) == 0
+        assert _state(config)["shared_memory"]["choice"] == "local"
+
+    def test_main_passes_the_flag_through(self, tmp_path, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        seen = []
+        monkeypatch.setattr(bootstrap, "bootstrap_project", lambda **kw: 0)
+        monkeypatch.setattr(bootstrap, "setup_shared_memory",
+                            lambda flag, **kw: seen.append((flag, kw)) or 0)
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--project-dir", str(tmp_path),
+                                          "--shared-memory", "existing", "u.git"])
+        with pytest.raises(SystemExit):
+            bootstrap.main()
+        assert seen[0][0] == ("existing", "u.git")
+
+    def test_failed_project_install_skips_shared_memory(self, tmp_path, config,
+                                                       monkeypatch):
+        seen = []
+        monkeypatch.setattr(bootstrap, "bootstrap_project", lambda **kw: 1)
+        monkeypatch.setattr(bootstrap, "setup_shared_memory",
+                            lambda *a, **kw: seen.append(1) or 0)
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--project-dir", str(tmp_path)])
+        with pytest.raises(SystemExit) as exc:
+            bootstrap.main()
+        assert exc.value.code == 1 and seen == []
+
+
+class TestSharedMemoryDryRun:
+    @pytest.mark.parametrize("flag", [("new", None), ("local", None), ("never", None),
+                                      ("existing", "https://example.test/x.git")])
+    def test_writes_nothing_and_runs_nothing(self, config, monkeypatch, flag):
+        tools = _FakeTools(monkeypatch)
+        assert _setup(flag, dry_run=True) == 0
+        assert tools.calls == []
+        assert not config.exists()
+
+    def test_does_not_ask(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        asked = _answers(monkeypatch)
+        assert _setup(None, interactive=True, dry_run=True) == 0
+        assert asked == []
+
+    def test_refresh_of_a_configured_block_writes_nothing(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        _setup(("local", None), lang="en")
+        before = (config / "CLAUDE.md").read_bytes()
+        assert _setup(None, dry_run=True, lang="ru") == 0
+        assert (config / "CLAUDE.md").read_bytes() == before
+
+
+class TestUserClaudeMdBlock:
+    MINE_TOP = "# My global notes\r\n\r\nAlways answer briefly.\r\n"
+    MINE_BOTTOM = "\r\n## Later\r\n\r\nMore of mine.\r\n"
+
+    def _block(self, text):
+        return bootstrap.marked_span(text, bootstrap._SHARED_BEGIN_RE,
+                                     bootstrap._SHARED_END_RE)
+
+    def test_appended_after_the_users_text_untouched(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        config.mkdir()
+        write_verbatim(config / "CLAUDE.md", self.MINE_TOP)
+        _setup(("local", None))
+        text = read_verbatim(config / "CLAUDE.md")
+        assert text.startswith(self.MINE_TOP)
+        assert self._block(text)
+        assert "\n" not in text.replace("\r\n", ""), "line endings mixed"
+
+    def test_backup_of_the_users_file(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        config.mkdir()
+        write_verbatim(config / "CLAUDE.md", self.MINE_TOP)
+        _setup(("local", None))
+        backups = list((config / "claude-protocol-backups").rglob("CLAUDE.md"))
+        assert [read_verbatim(b) for b in backups] == [self.MINE_TOP]
+
+    def test_refresh_replaces_only_between_the_markers(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        _setup(("local", None), lang="en")
+        block = read_verbatim(config / "CLAUDE.md")
+        write_verbatim(config / "CLAUDE.md", self.MINE_TOP + "\r\n" + block
+                       + self.MINE_BOTTOM)
+        assert _setup(None, lang="ru") == 0
+        text = read_verbatim(config / "CLAUDE.md")
+        assert text.startswith(self.MINE_TOP) and text.endswith(self.MINE_BOTTOM)
+        assert "Памяти две" in text and "There are two memories" not in text
+        assert text.count("shared-memory:begin") == 1
+
+    def test_unchanged_block_is_not_rewritten(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        _setup(("local", None))
+        _setup(None)
+        assert not (config / "claude-protocol-backups").exists()
+
+    def test_language_is_remembered(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        _setup(("local", None), lang="ru")
+        _setup(None, default_lang="en")
+        assert "Памяти две" in read_verbatim(config / "CLAUDE.md")
+
+    def test_project_language_is_the_first_default(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        _setup(("local", None), default_lang="ru")
+        assert "Памяти две" in read_verbatim(config / "CLAUDE.md")
+
+    def test_begin_without_end_is_left_alone(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        config.mkdir()
+        broken = "mine\n<!-- claude-protocol:shared-memory:begin -->\nhalf\n"
+        write_verbatim(config / "CLAUDE.md", broken)
+        assert _setup(("local", None)) == 1
+        assert read_verbatim(config / "CLAUDE.md") == broken
+
+    def test_import_line_points_at_the_index(self, config, monkeypatch):
+        _FakeTools(monkeypatch)
+        _setup(("local", None))
+        text = read_verbatim(config / "CLAUDE.md")
+        dest = (config / "shared-memory").as_posix()
+        assert re.search(r"^@\S+/MEMORY\.md$", text, re.MULTILINE)
+        assert dest in text or "@~/" in text
+
+    def test_project_claude_md_markers_do_not_match_ours(self):
+        both = ("<!-- claude-protocol:shared-memory:begin -->\nx\n"
+                "<!-- claude-protocol:shared-memory:end -->\n")
+        assert marked_span(both) is None
+
+
+class TestSharedMemoryTemplates:
+    @pytest.mark.parametrize("name", ["CLAUDE-block.md", "CLAUDE-block-ru.md"])
+    def test_marked_and_carry_the_import(self, name):
+        text = read_verbatim(TEMPLATES_DIR / "shared-memory" / name)
+        assert bootstrap.marked_span(text, bootstrap._SHARED_BEGIN_RE,
+                                     bootstrap._SHARED_END_RE) == (0, len(text.rstrip()))
+        assert "@{{SHARED_MEMORY}}/MEMORY.md" in text
+
+    def test_cli_help_lists_the_flag(self):
+        cli = (Path(__file__).parent.parent / "scripts" / "cli.js").read_text(encoding="utf-8")
+        assert "--shared-memory" in cli

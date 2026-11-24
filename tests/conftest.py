@@ -1,11 +1,12 @@
 """Keep every test away from the real ~/.claude and the real `gh`.
 
-A bootstrap run reads Claude Code's folder — the plugin registry, and the old
-project memory in projects/<key>/memory — and asks `gh` whether the repository
-is public. On a developer's machine both are real: a test would read their
-memory, and its answer would depend on whether `gh` is logged in. Each test
-gets an empty config folder of its own and a repository whose visibility
-nobody could tell. A test that needs something else sets it itself.
+A bootstrap run reads and writes Claude Code's folder — the plugin registry,
+the old project memory in projects/<key>/memory, shared memory and the
+user-level CLAUDE.md — and asks `gh` whether the repository is public. On a
+developer's machine both are real: a test would read their memory, and its
+answer would depend on whether `gh` is logged in. Each test gets an empty
+config folder of its own and a repository whose visibility nobody could tell.
+A test that needs something else sets it itself.
 """
 import sys
 from pathlib import Path
