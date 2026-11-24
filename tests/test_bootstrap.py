@@ -5176,3 +5176,42 @@ class TestBdMemoryInAFullRun:
 
         assert (tmp_path / ".memory" / "k.md").exists()
         assert "- [k](k.md)" in read_verbatim(tmp_path / ".memory" / "MEMORY.md")
+
+
+# ============================================================================
+# The memory-sort skill
+# ============================================================================
+# Sorting project memory into shared memory is a judgement call, so it ships
+# as a skill: the plugin loads it from templates/skills, npx copies it. Its
+# route test must stay the one in the shared-memory block, not a second one.
+
+MEMORY_SORT_KEY = "skills/memory-sort/SKILL.md"
+ROUTE_QUESTION = "will this help in another project?"
+
+
+class TestMemorySortSkill:
+    def test_it_is_shipped_and_handed_to_the_plugin(self):
+        assert MEMORY_SORT_KEY in bootstrap.shipped_skill_files()
+        assert f".claude/{MEMORY_SORT_KEY}" in bootstrap.plugin_provided_relpaths()
+
+    def test_its_name_matches_its_directory(self):
+        text = read_verbatim(TEMPLATES_DIR / MEMORY_SORT_KEY)
+        assert text.startswith("---\n")
+        front = text.split("---", 2)[1]
+        assert re.search(r"^name: memory-sort$", front, re.M)
+        description = re.search(r"^description: (.+)$", front, re.M).group(1)
+        for trigger in ("разбери память", "что перенести в общую память"):
+            assert trigger in description
+
+    def test_it_reuses_the_route_test_of_the_shared_memory_block(self):
+        skill = read_verbatim(TEMPLATES_DIR / MEMORY_SORT_KEY)
+        block = read_verbatim(TEMPLATES_DIR / "shared-memory" / "CLAUDE-block.md")
+        assert ROUTE_QUESTION in block, "the block's wording moved; update the skill"
+        assert ROUTE_QUESTION in skill
+
+    def test_it_reads_the_state_file_bootstrap_writes(self):
+        skill = read_verbatim(TEMPLATES_DIR / MEMORY_SORT_KEY)
+        assert bootstrap.SHARED_MEMORY_STATE in skill
+        assert "shared_memory" in skill
+        for choice in bootstrap.SHARED_MEMORY_CHOICES:
+            assert choice in skill

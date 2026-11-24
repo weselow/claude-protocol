@@ -12,7 +12,7 @@
     {
       "name": "claude-protocol",
       "source": "./",
-      "description": "Hooks, agents and the project-discovery and bead-review skills. Rules and CLAUDE.md are laid into the project by /claude-protocol:init.",
+      "description": "Hooks, agents and the project-discovery, bead-review and memory-sort skills. Rules and CLAUDE.md are laid into the project by /claude-protocol:init.",
       "version": "3.10.0",
       "author": {
         "name": "weselow",

@@ -58,6 +58,7 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+- **`memory-sort` skill: what in project memory belongs in shared memory** — `/memory-sort` (`/claude-protocol:memory-sort` with the plugin), or just "sort the memory". It reads the project's `.memory/` (the main checkout's, also from a worktree), applies the route test of the "Memory: where to write" block and proposes a numbered "move to shared" list with a reason per file; facts imported from bd are marked. Files holding passwords, tokens or keys are listed apart and never moved. Only what the user confirms moves — file, index line and all — and a fact the shared memory already has is merged or dropped instead of copied. Then the shared memory is committed and pushed. Hundreds of files go in batches of about 30. No shared memory set up — it says so and prints the `--shared-memory` flag.
 - **Memory hooks: shared memory pulled at session start, agents told where memory is** — session-start runs `git pull --ff-only` on the shared memory when it is a clone with an upstream, beside the other checks and for at most 5 seconds, never stopping to ask for a password; no network or local commits in the way — one warning line, the session goes on. A new `memory-pointer` hook (SubagentStart) gives each agent one line naming `<project>/.memory/MEMORY.md` and the shared `MEMORY.md`, whichever exist and are not empty — the main checkout's `.memory` also from inside a worktree; nothing when there is no memory. A pointer, not the indexes: what a task needs goes in the bead.
 - **Project memory moves into `.memory/` in the project** — bootstrap sets `autoMemoryDirectory` in `.claude/settings.local.json`, copies the old memory from `~/.claude/projects/<key>/memory` (a file that differs is never overwritten: the old one goes beside it as `*.from-old-memory.md`; `MEMORY.md` is merged line by line; the old folder stays), and imports `@.memory/MEMORY.md` in the managed CLAUDE.md block so agents see the index too. A public repository, or one whose visibility `gh` cannot tell, gets `/.memory/` in `.gitignore`; a private one commits it.
 - **Shared memory, one per machine** — init and upgrade ask once: connect an existing repository, create a private `<login>/claude-memory` with gh, use a local folder without git, or not now (remembered). The folder is `~/.claude/shared-memory` (`CLAUDE_CONFIG_DIR` respected); a marked block in `~/.claude/CLAUDE.md` says which memory to write to and loads its `MEMORY.md`. Nothing outside the markers is touched, and the file is backed up to `~/.claude/claude-protocol-backups/` before each change. Runs nobody can answer (`--all`, CI, the plugin's `/claude-protocol:init`) ask nothing and print the flag instead: `--shared-memory existing <url> | new | local | never`.
@@ -327,6 +328,7 @@ Full details: [docs/decisions-en.md](docs/decisions-en.md)
   skills/
     project-discovery/      # Extracts project conventions
     bead-review/            # Review procedure and the request form
+    memory-sort/            # Moves project memory into shared memory
   settings.json             # Hook configuration
   .manifest.json            # File hashes for safe upgrades
 CLAUDE.md                   # Orchestrator instructions
@@ -416,8 +418,8 @@ one at a time with no explanation.
 ### Install as a plugin
 
 The same thing, installed through Claude Code's own plugin system. The plugin
-carries the hooks, the agents and the skills (project-discovery and
-bead-review), and updates them for you. What a plugin cannot carry is the half
+carries the hooks, the agents and the skills (project-discovery,
+bead-review and memory-sort), and updates them for you. What a plugin cannot carry is the half
 that has to live in the project — the beads database, `.claude/rules/*.md` and
 the block in `CLAUDE.md` — so one command lays that half down.
 
