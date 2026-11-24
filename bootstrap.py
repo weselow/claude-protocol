@@ -2504,8 +2504,8 @@ def import_bd_memory(project_dir: Path, dry_run: bool,
         print(f"  - {pre}the old memory is copied first, so {MEMORY_INDEX} may pass "
               f"the {_INDEX_MAX_LINES} lines / {_INDEX_MAX_BYTES // 1024} KB Claude "
               f"Code loads; then the facts are listed in {MEMORY_DIR}/{BD_MEMORY_INDEX}")
-    print(f"  - {pre}sort them: ask to sort the memory — /claude-protocol:memory-sort "
-          "with the plugin, /memory-sort otherwise")
+    print(f"  - {pre}sort them with the memory-sort skill — "
+          "/claude-protocol:memory-sort with the plugin, /memory-sort otherwise")
 
 
 def setup_project_memory(project_dir: Path, dry_run: bool) -> None:
