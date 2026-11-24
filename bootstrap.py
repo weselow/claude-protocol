@@ -2404,8 +2404,8 @@ def _write_bd_index(new: Path, lines: list, dry_run: bool) -> bool:
         return False
     if not side.exists() and not dry_run:
         write_verbatim(side, "# Imported from bd memory\n\n"
-                             "Facts moved from `bd memories`. Sort them: keep what still "
-                             "holds, move what matters into MEMORY.md.\n\n")
+                             "Facts moved from `bd memories`. Sort them (memory-sort skill): "
+                             "keep what still holds, move what matters into MEMORY.md.\n\n")
     _append_lines(side, lines, dry_run)
     pointer = (f"- [Imported from bd memory]({BD_MEMORY_INDEX}) — older project "
                "lessons from bd remember; open when MEMORY.md has nothing on the topic")
@@ -2499,11 +2499,13 @@ def import_bd_memory(project_dir: Path, dry_run: bool,
         print(f"  - {pre}{MEMORY_INDEX} would pass the {_INDEX_MAX_LINES} lines / "
               f"{_INDEX_MAX_BYTES // 1024} KB Claude Code loads: the imported facts "
               f"are listed in {MEMORY_DIR}/{BD_MEMORY_INDEX}, and {MEMORY_INDEX} has "
-              "one line pointing to it. Sort them when you can.")
+              "one line pointing to it.")
     elif index_may_grow:
         print(f"  - {pre}the old memory is copied first, so {MEMORY_INDEX} may pass "
               f"the {_INDEX_MAX_LINES} lines / {_INDEX_MAX_BYTES // 1024} KB Claude "
               f"Code loads; then the facts are listed in {MEMORY_DIR}/{BD_MEMORY_INDEX}")
+    print(f"  - {pre}sort them: ask to sort the memory — /claude-protocol:memory-sort "
+          "with the plugin, /memory-sort otherwise")
 
 
 def setup_project_memory(project_dir: Path, dry_run: bool) -> None:

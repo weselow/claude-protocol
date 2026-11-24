@@ -21,7 +21,10 @@ Wrote to shared memory — commit and push it (when it is a git repository).
 Never write passwords, tokens or keys to any memory. A rule about how to work is not
 memory — propose a change to the rule instead.
 
-When the user says to close the session, say what was written and where.
+When the user says to close the session, say what was written and where. If
+this session put entries into project memory that will help in another project,
+offer to move them to shared memory (only entries from this session). Sorting
+the older memory is the memory-sort skill's job.
 
 @{{SHARED_MEMORY}}/MEMORY.md
 

@@ -4773,6 +4773,16 @@ class TestSharedMemoryTemplates:
                                      bootstrap._SHARED_END_RE) == (0, len(text.rstrip()))
         assert "@{{SHARED_MEMORY}}/MEMORY.md" in text
 
+    @pytest.mark.parametrize("name, only_this_session", [
+        ("CLAUDE-block.md", "only entries from this session"),
+        ("CLAUDE-block-ru.md", "только записи этой сессии"),
+    ])
+    def test_closing_a_session_offers_to_move_its_own_entries(self, name, only_this_session):
+        """The old memory is the memory-sort skill's job, not the session's."""
+        text = read_verbatim(TEMPLATES_DIR / "shared-memory" / name)
+        assert only_this_session in text
+        assert "memory-sort" in text
+
     def test_cli_help_lists_the_flag(self):
         cli = (Path(__file__).parent.parent / "scripts" / "cli.js").read_text(encoding="utf-8")
         assert "--shared-memory" in cli
@@ -4849,6 +4859,23 @@ class TestBdMemoryImport:
         bootstrap.setup_project_memory(tmp_path, dry_run=False)
 
         assert "imported 2 fact(s)" in capsys.readouterr().out
+
+    def test_names_the_skill_that_sorts_what_came_in(self, tmp_path, monkeypatch, capsys):
+        _bd_says(monkeypatch, {"a": "x"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        out = capsys.readouterr().out
+        assert "/claude-protocol:memory-sort" in out and "/memory-sort" in out
+
+    def test_says_nothing_of_the_skill_when_nothing_came_in(self, tmp_path, monkeypatch, capsys):
+        _bd_says(monkeypatch, {"a": "x"})
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        capsys.readouterr()
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert "memory-sort" not in capsys.readouterr().out
 
     def test_a_folder_you_chose_gets_nothing(self, tmp_path, monkeypatch):
         """autoMemoryDirectory names another folder: .memory is not the memory."""
