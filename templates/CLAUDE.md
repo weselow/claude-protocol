@@ -73,6 +73,14 @@ bd dep relate {NEW_ID} {OLD_ID}
   changes nothing
 - merge-supervisor — conflict resolution for merge, rebase and cherry-pick
 
+## Project memory
+
+Claude Code's memory for this project lives in `.memory/` (set by
+`autoMemoryDirectory` in `.claude/settings.local.json`). Its index is imported
+here, so agents see it too:
+
+@.memory/MEMORY.md
+
 <!-- claude-protocol:end -->
 
 ## Current State
