@@ -77,8 +77,8 @@ OBSOLETE_DIRS: list[str] = [
 ]
 
 # Substrings matched against hook command strings in .claude/settings.json.
-# Any hook entry whose "hooks[0].command" contains one of these substrings
-# is stripped. Original settings.json is backed up before writing.
+# Every hook whose command contains one of these substrings is stripped,
+# wherever it sits in its group; a group left empty goes, then an empty event. Original settings.json is backed up before writing.
 OBSOLETE_SETTINGS_HOOKS: list[str] = [
     "memory-capture.cjs",
     # Shell hooks from the pre-v3 fork. v3 ships no .sh hooks, so these
