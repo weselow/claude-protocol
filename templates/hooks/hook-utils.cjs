@@ -21,8 +21,8 @@ const path = require('path');
 // Module-level permission mode — set by readStdinJSON(), read by deny()/ask()
 let _permissionMode = '';
 
-// The oldest beads CLI the rules work against: they call bd memories, bd
-// remember, bd worktree and bd prime. Keep in sync with BD_MIN_VERSION in
+// The oldest beads CLI the rules work against: they call bd worktree and
+// bd prime. Keep in sync with BD_MIN_VERSION in
 // bootstrap.py — a test asserts the two agree, because two copies of a
 // constant in two languages drift silently.
 const BD_MIN_VERSION = '1.1.0';

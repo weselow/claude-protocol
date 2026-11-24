@@ -61,7 +61,8 @@ twice:**
 | Where | What | Why |
 |---|---|---|
 | Bead comments (`bd comments add`) | progress, findings, decisions for this task | lives with the bead, closes with it |
-| `bd remember` | a lesson useful another time, in another project | found via `bd memories` from anywhere |
+| Project memory (`.memory/`) | a lesson for this project | its `MEMORY.md` index is loaded in every session of this project |
+| Shared memory | a lesson that will help in another project — where the "Memory: where to write" block in `~/.claude/CLAUDE.md` says; not set up — project memory | once shared memory is set up, its index is loaded in every project |
 | `docs/worklog/` | what to check first when it breaks, what was left alone and why | found by grep six months later, long after the bead closed |
 
 The repository may be public — before writing, check the paragraph for internal
