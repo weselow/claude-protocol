@@ -3348,7 +3348,7 @@ class TestPluginManifests:
     def test_hooks_json_runs_files_that_are_there(self):
         hooks = _read_json(REPO_ROOT / "hooks" / "hooks.json")["hooks"]
 
-        assert set(hooks) == {"PreToolUse", "SubagentStop", "SessionStart"}
+        assert set(hooks) == {"PreToolUse", "SubagentStop", "SubagentStart", "SessionStart"}
         for groups in hooks.values():
             for group in groups:
                 for hook in group["hooks"]:

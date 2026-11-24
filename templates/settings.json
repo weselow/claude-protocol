@@ -21,6 +21,16 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const p=require('path'),f=require('fs'),c=require('child_process');let d=process.env.CLAUDE_PROJECT_DIR;if(!d){try{d=c.execSync('git rev-parse --show-toplevel',{encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim()}catch{d=process.cwd()}}const h=p.join(d,'.claude','hooks',process.argv[1]);f.existsSync(h)?require(h):console.error('[claude-protocol] hook not found: '+h)\" memory-pointer.cjs"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

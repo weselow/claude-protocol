@@ -672,7 +672,7 @@ function pluginActiveHere(projectDir) {
 // settings was installed from npx before the plugin arrived.
 const PLUGIN_PROVIDED_HOOKS = [
   'bash-guard.cjs', 'validate-completion.cjs', 'session-start.cjs',
-  'update-check.cjs',
+  'update-check.cjs', 'memory-pointer.cjs',
 ];
 
 /**
@@ -926,6 +926,67 @@ function runHook(hookName, fn) {
 }
 
 // ---------------------------------------------------------------------------
+// Memory: the project's .memory and the machine's shared memory
+// ---------------------------------------------------------------------------
+
+/** Claude Code's own folder: CLAUDE_CONFIG_DIR, or ~/.claude. */
+function claudeConfigDir() {
+  return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+}
+
+/**
+ * The shared memory folder bootstrap set up, or null.
+ *
+ * bootstrap keeps the answer in <config>/claude-protocol.json, key
+ * shared_memory = { choice, path, remote }. "never", no answer, an unreadable
+ * file or a folder that is gone all mean there is none.
+ */
+function sharedMemoryDir() {
+  let state;
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(claudeConfigDir(), 'claude-protocol.json'), 'utf8'));
+    state = data && data.shared_memory;
+  } catch {
+    return null;
+  }
+  if (!state || !['existing', 'new', 'local'].includes(state.choice)) return null;
+  if (typeof state.path !== 'string' || !path.isAbsolute(state.path)) return null;
+  try {
+    return fs.statSync(state.path).isDirectory() ? state.path : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The main checkout's root, also from inside a linked worktree.
+ *
+ * .memory is often kept out of git (a public repository), so a worktree has
+ * none of its own: the one that counts is the main checkout's. Every worktree
+ * shares the main checkout's .git, which --git-common-dir names. Outside git,
+ * or for a layout where that is not <root>/.git, the folder itself.
+ */
+function mainCheckoutRoot(dir) {
+  const common = execCommand('git', ['-C', dir, 'rev-parse', '--git-common-dir'], { cwd: dir });
+  if (!common) return dir;
+  const gitDir = path.resolve(dir, common);
+  return path.basename(gitDir) === '.git' ? path.dirname(gitDir) : dir;
+}
+
+/** <main checkout>/.memory/MEMORY.md when it exists, or null. */
+function projectMemoryIndex(projectDir) {
+  const index = path.join(mainCheckoutRoot(projectDir), '.memory', 'MEMORY.md');
+  return fs.existsSync(index) ? index : null;
+}
+
+/** <shared memory>/MEMORY.md when it exists, or null. */
+function sharedMemoryIndex() {
+  const dir = sharedMemoryDir();
+  const index = dir && path.join(dir, 'MEMORY.md');
+  return index && fs.existsSync(index) ? index : null;
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -962,4 +1023,9 @@ module.exports = {
   isSubagent,
   logError,
   runHook,
+  claudeConfigDir,
+  sharedMemoryDir,
+  mainCheckoutRoot,
+  projectMemoryIndex,
+  sharedMemoryIndex,
 };

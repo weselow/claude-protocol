@@ -760,3 +760,113 @@ describe('session-start on a project without beads', () => {
     expect(result.status).toBe(0);
   });
 });
+
+describe('session-start updating the shared memory', SLOW, () => {
+  /**
+   * A Claude config folder whose shared memory is a clone of a local bare
+   * repository, the way bootstrap leaves it, plus a second clone standing for
+   * another machine. No network: the remote is a folder.
+   */
+  function sharedMemory() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-start-shared-'));
+    madeHere.push(root);
+    const remote = path.join(root, 'remote.git');
+    const config = path.join(root, 'config');
+    const shared = path.join(config, 'shared-memory');
+    const other = path.join(root, 'other');
+    git(root, 'init', '-q', '--bare', '-b', 'main', remote);
+    git(root, 'clone', '-q', remote, other);
+    git(other, 'checkout', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(other, 'MEMORY.md'), '- first\n');
+    git(other, 'add', '.');
+    git(other, 'commit', '-q', '-m', 'first');
+    git(other, 'push', '-q', '-u', 'origin', 'main');
+    git(root, 'clone', '-q', '-b', 'main', remote, shared);
+    fs.writeFileSync(path.join(config, 'claude-protocol.json'), JSON.stringify({
+      shared_memory: { choice: 'existing', path: shared, remote },
+    }));
+    const pushFromOther = (text) => {
+      fs.writeFileSync(path.join(other, 'MEMORY.md'), text);
+      git(other, 'commit', '-q', '-am', 'more');
+      git(other, 'push', '-q');
+    };
+    return { config, shared, remote, pushFromOther };
+  }
+
+  /** A project with no .beads: the pull is all there is to see. */
+  function plainProject() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-start-plain-'));
+    madeHere.push(dir);
+    return dir;
+  }
+
+  const memoryWarning = (stdout) => stdout.split('\n').filter(line => /shared memory/i.test(line));
+
+  it('pulls what another machine pushed', () => {
+    const memory = sharedMemory();
+    memory.pushFromOther('- first\n- second\n');
+
+    const result = runHook(plainProject(), { CLAUDE_CONFIG_DIR: memory.config });
+
+    expect(result.status).toBe(0);
+    expect(fs.readFileSync(path.join(memory.shared, 'MEMORY.md'), 'utf8')).toContain('second');
+    expect(memoryWarning(result.stdout)).toEqual([]);
+  });
+
+  it('with the remote out of reach, one warning line and the session goes on', () => {
+    const memory = sharedMemory();
+    git(memory.shared, 'remote', 'set-url', 'origin', path.join(memory.config, 'gone.git'));
+
+    const result = runHook(plainProject(), { CLAUDE_CONFIG_DIR: memory.config });
+
+    expect(result.status).toBe(0);
+    expect(memoryWarning(result.stdout)).toHaveLength(1);
+  });
+
+  it('with local work in the way of a fast-forward, one warning line', () => {
+    const memory = sharedMemory();
+    memory.pushFromOther('- first\n- from the other machine\n');
+    fs.writeFileSync(path.join(memory.shared, 'MEMORY.md'), '- first\n- from here\n');
+    git(memory.shared, 'commit', '-q', '-am', 'here');
+
+    const result = runHook(plainProject(), { CLAUDE_CONFIG_DIR: memory.config });
+
+    expect(result.status).toBe(0);
+    expect(memoryWarning(result.stdout)).toHaveLength(1);
+    expect(fs.readFileSync(path.join(memory.shared, 'MEMORY.md'), 'utf8')).toContain('from here');
+  });
+
+  it('says nothing for a local folder without git', () => {
+    const config = fs.mkdtempSync(path.join(os.tmpdir(), 'session-start-local-'));
+    madeHere.push(config);
+    const shared = path.join(config, 'shared-memory');
+    fs.mkdirSync(shared);
+    fs.writeFileSync(path.join(config, 'claude-protocol.json'), JSON.stringify({
+      shared_memory: { choice: 'local', path: shared, remote: null },
+    }));
+
+    const result = runHook(plainProject(), { CLAUDE_CONFIG_DIR: config });
+
+    expect(result.status).toBe(0);
+    expect(memoryWarning(result.stdout)).toEqual([]);
+  });
+
+  it('says nothing for a repository with nothing to pull from', () => {
+    const memory = sharedMemory();
+    git(memory.shared, 'branch', '-q', '--unset-upstream');
+
+    const result = runHook(plainProject(), { CLAUDE_CONFIG_DIR: memory.config });
+
+    expect(memoryWarning(result.stdout)).toEqual([]);
+  });
+
+  it('pulls in a project with beads too', () => {
+    const memory = sharedMemory();
+    memory.pushFromOther('- first\n- third\n');
+
+    const result = runHook(project(), { CLAUDE_CONFIG_DIR: memory.config });
+
+    expect(result.status).toBe(0);
+    expect(fs.readFileSync(path.join(memory.shared, 'MEMORY.md'), 'utf8')).toContain('third');
+  });
+});
