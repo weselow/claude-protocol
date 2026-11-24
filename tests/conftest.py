@@ -6,6 +6,8 @@ user-level CLAUDE.md — and asks `gh` whether the repository is public. On a
 developer's machine both are real: a test would read their memory, and its
 answer would depend on whether `gh` is logged in. Each test gets an empty
 config folder of its own and a repository whose visibility nobody could tell.
+bd is never asked either: a project with .beads would hand over the bd
+memory of whatever database bd finds, so the import reads nothing by default.
 A test that needs something else sets it itself.
 """
 import sys
@@ -23,3 +25,4 @@ def _no_real_claude_dir_or_gh(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR",
                        str(tmp_path_factory.mktemp("claude-config")))
     monkeypatch.setattr(bootstrap, "repo_visibility", lambda project_dir: None)
+    monkeypatch.setattr(bootstrap, "read_bd_memories", lambda project_dir: None)
