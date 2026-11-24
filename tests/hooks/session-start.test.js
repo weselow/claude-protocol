@@ -97,8 +97,14 @@ fs.mkdtempSync = (prefix, ...rest) => {
 };
 afterAll(() => {
   fs.mkdtempSync = mkdtemp;
+  // A temp folder with .beads can stay locked for a moment on Windows.
+  // Leftovers in the temp dir are harmless; failing the file over them is not.
   for (const dir of madeHere) {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch (err) {
+      console.warn(`could not remove ${dir}: ${err.code || err.message}`);
+    }
   }
 });
 
