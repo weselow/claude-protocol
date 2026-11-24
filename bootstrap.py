@@ -77,8 +77,8 @@ OBSOLETE_DIRS: list[str] = [
 ]
 
 # Substrings matched against hook command strings in .claude/settings.json.
-# Any hook entry whose "hooks[0].command" contains one of these substrings
-# is stripped. Original settings.json is backed up before writing.
+# Every hook whose command contains one of these substrings is stripped,
+# wherever it sits in its group; a group left empty goes, then an empty event. Original settings.json is backed up before writing.
 OBSOLETE_SETTINGS_HOOKS: list[str] = [
     "memory-capture.cjs",
     # Shell hooks from the pre-v3 fork. v3 ships no .sh hooks, so these
@@ -89,12 +89,17 @@ OBSOLETE_SETTINGS_HOOKS: list[str] = [
     # v3.6.0 hook revision — see OBSOLETE_FILES above.
     "enforce-branch-before-edit",
     "nudge-claude-md-update",
+    # `bd prime` prints all of bd's memory (hundreds of thousands of chars in
+    # big projects); Claude Code cuts hook output over 10k chars to 2k, so the
+    # hook only burns time. Some projects carry it here, not only in local.
+    "bd prime",
 ]
 
 # Substrings matched against hook command strings in
 # .claude/settings.local.json. Same semantics as OBSOLETE_SETTINGS_HOOKS.
-# `bd prime` used to be a SessionStart hook there; the templated global
-# settings.json now owns session bootstrapping, so legacy local entries go.
+# `bd prime` used to be a SessionStart hook there (and in some projects in
+# settings.json too — see OBSOLETE_SETTINGS_HOOKS); the templated settings.json
+# now owns session bootstrapping, so legacy entries go from both files.
 OBSOLETE_LOCAL_SETTINGS_PATTERNS: list[str] = [
     "bd prime",
 ]
@@ -772,16 +777,37 @@ def _upgrade_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _hook_command_matches(hook_entry: dict, patterns: list) -> tuple:
-    """Return (command_str, matched) for a hook entry dict.
+def _hook_matches(hook: dict, patterns: list) -> str:
+    """Return the hook's command if it contains any of `patterns`, else ""."""
+    cmd = hook.get("command", "") if isinstance(hook, dict) else ""
+    if isinstance(cmd, str) and any(p in cmd for p in patterns):
+        return cmd
+    return ""
 
-    Tolerant of malformed entries — returns ("", False) on any structural error.
+
+def _strip_entry_hooks(entry: dict, patterns: list) -> tuple:
+    """Remove matching hooks from one entry. Returns (entry_or_None, stripped).
+
+    Checks every hook in the entry's "hooks" list, not only the first, so a
+    user's own hook grouped with an obsolete one survives. The entry is
+    dropped (None) only when nothing is left in it. Malformed entries are
+    kept untouched.
     """
-    try:
-        cmd = hook_entry.get("hooks", [{}])[0].get("command", "") or ""
-    except Exception:
-        return "", False
-    return cmd, any(p in cmd for p in patterns)
+    hooks = entry.get("hooks") if isinstance(entry, dict) else None
+    if not isinstance(hooks, list):
+        return entry, []
+    kept, stripped = [], []
+    for hook in hooks:
+        cmd = _hook_matches(hook, patterns)
+        if cmd:
+            stripped.append(cmd)
+        else:
+            kept.append(hook)
+    if not stripped:
+        return entry, []
+    if not kept:
+        return None, stripped
+    return {**entry, "hooks": kept}, stripped
 
 
 def _load_hooks_section(settings_path: Path) -> tuple:
@@ -802,11 +828,10 @@ def _partition_entries(entries: list, patterns: list) -> tuple:
     """Split hook entries into (kept_entries, stripped_commands) for one event."""
     kept, stripped = [], []
     for entry in entries:
-        cmd, matched = _hook_command_matches(entry, patterns)
-        if matched:
-            stripped.append(cmd)
-        else:
-            kept.append(entry)
+        new_entry, cmds = _strip_entry_hooks(entry, patterns)
+        stripped.extend(cmds)
+        if new_entry is not None:
+            kept.append(new_entry)
     return kept, stripped
 
 
@@ -824,7 +849,10 @@ def _strip_obsolete_hooks(
         if not isinstance(entries, list):
             continue
         kept, stripped = _partition_entries(entries, patterns)
-        hooks[event] = kept
+        if stripped and not kept:
+            del hooks[event]  # nothing left for this event; keep "hooks" itself
+        else:
+            hooks[event] = kept
         all_stripped.extend(stripped)
     if all_stripped and not dry_run:
         # Ask for the backup directory only now — calling backup_fn() eagerly

@@ -58,6 +58,8 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+- **Upgrade removes `bd prime` from `.claude/settings.json` too** — before, only `settings.local.json` was cleaned; the hook dumps all of bd's memory, which Claude Code cuts to 2,000 characters anyway.
+
 ### v3.10.0 (2026-09-17)
 
 - **Security fix: arguments passed to `.cmd` wrappers on Windows** — bd and gh
