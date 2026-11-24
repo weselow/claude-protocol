@@ -1266,12 +1266,27 @@ def version_below(current: str | None, minimum: str) -> bool:
         return False
 
 
+def _bd_command(*args: str) -> tuple:
+    """bd's command line and whether it needs a shell.
+
+    Through cmd.exe a timeout kills the shell, not bd, and the run then waits
+    for bd anyway. So bd runs by the path which() finds, with no shell; only
+    a .cmd/.bat wrapper (npm's) cannot start without one.
+    """
+    found = shutil.which("bd")
+    if found is None:
+        return ["bd", *args], _SHELL
+    wrapper = Path(found).suffix.lower() in (".cmd", ".bat")
+    return [found, *args], _SHELL and wrapper
+
+
 def read_bd_version() -> str | None:
     """The installed bd's version, or None when bd cannot answer."""
+    cmd, shell = _bd_command("version")
     try:
         result = subprocess.run(
-            ["bd", "version"], capture_output=True, text=True,
-            shell=_SHELL, stdin=subprocess.DEVNULL, timeout=15,
+            cmd, capture_output=True, text=True,
+            shell=shell, stdin=subprocess.DEVNULL, timeout=15,
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -2257,10 +2272,11 @@ def read_bd_memories(project_dir: Path) -> dict | None:
     """
     if not (project_dir / ".beads").is_dir() or shutil.which("bd") is None:
         return None
+    cmd, shell = _bd_command("memories", "--json")
     try:
         result = subprocess.run(
-            ["bd", "memories", "--json"], cwd=project_dir, capture_output=True,
-            shell=_SHELL, stdin=subprocess.DEVNULL, timeout=60,
+            cmd, cwd=project_dir, capture_output=True,
+            shell=shell, stdin=subprocess.DEVNULL, timeout=60,
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -2314,17 +2330,21 @@ def _bd_entry_path(new: Path, key: str, taken: set) -> tuple:
 
     A file of the same name that holds something else — another key cut to
     the same length, or a fact Claude wrote — is never overwritten: the entry
-    takes the next free name.
+    takes the next free name. Names are compared ignoring case, as Windows and
+    macOS do: Foo.md and foo.md would be one file there. `taken` holds the
+    lower-cased names this run has already handed out.
     """
     stem = _bd_file_stem(key)
+    there = ({p.name.lower(): p for p in new.iterdir()} if new.is_dir() else {})
     n = 1
     while True:
-        path = new / (f"{stem}.md" if n == 1 else f"{stem}-{n}.md")
-        if path.exists():
-            if path.is_file() and _bd_key_of(path) == key:
-                return path, True
-        elif path.name not in taken:
-            return path, False
+        name = f"{stem}.md" if n == 1 else f"{stem}-{n}.md"
+        found = there.get(name.lower())
+        if found is not None:
+            if found.is_file() and _bd_key_of(found) == key:
+                return found, True
+        elif name.lower() not in taken:
+            return new / name, False
         n += 1
 
 
@@ -2384,18 +2404,39 @@ def _write_bd_index(new: Path, lines: list, dry_run: bool) -> bool:
                              "Facts moved from `bd memories`. Sort them: keep what still "
                              "holds, move what matters into MEMORY.md.\n\n")
     _append_lines(side, lines, dry_run)
+    pointer = (f"- [Imported from bd memory]({BD_MEMORY_INDEX}) — older project "
+               "lessons from bd remember; open when MEMORY.md has nothing on the topic")
     if f"]({BD_MEMORY_INDEX})" not in text:
-        _append_lines(index, [f"- [Imported from bd memory]({BD_MEMORY_INDEX}) — "
-                              "older project lessons from bd remember; open when "
-                              "MEMORY.md has nothing on the topic"], dry_run)
+        if _index_fits(text, [pointer]):
+            _append_lines(index, [pointer], dry_run)
+        elif not dry_run:
+            write_verbatim(index, _near_top(text, pointer))
     return True
 
 
-def import_bd_memory(project_dir: Path, dry_run: bool) -> None:
+def _near_top(text: str, line: str) -> str:
+    """text with line put first, or second under a leading # heading.
+
+    Past the limit Claude Code would never read it; at the top it costs the
+    index its last line instead, which was already at the edge.
+    """
+    nl = _newline_of(text) if text else "\n"
+    lines = text.splitlines(keepends=True)
+    at = 1 if lines and lines[0].startswith("# ") else 0
+    if at and not lines[0].endswith(("\n", "\r")):
+        lines[0] += nl
+    lines.insert(at, line + nl)
+    return "".join(lines)
+
+
+def import_bd_memory(project_dir: Path, dry_run: bool,
+                     index_may_grow: bool = False) -> None:
     """Copy bd's memory of the project into .memory, one file per entry.
 
     An entry imported before — a file in .memory with its key — is skipped,
-    so the import can run on every upgrade.
+    so the import can run on every upgrade. index_may_grow: a dry run that
+    would first copy the old memory, which it did not, so MEMORY.md may end up
+    fuller than the overflow check saw.
     """
     memories = read_bd_memories(project_dir)
     if not memories:
@@ -2407,7 +2448,7 @@ def import_bd_memory(project_dir: Path, dry_run: bool) -> None:
         if already:
             skipped += 1
             continue
-        taken.add(path.name)
+        taken.add(path.name.lower())
         if not dry_run:
             write_verbatim(path, _bd_memory_file(key, text))
         lines.append(_bd_index_line(key, path, text))
@@ -2423,6 +2464,10 @@ def import_bd_memory(project_dir: Path, dry_run: bool) -> None:
               f"{_INDEX_MAX_BYTES // 1024} KB Claude Code loads: the imported facts "
               f"are listed in {MEMORY_DIR}/{BD_MEMORY_INDEX}, and {MEMORY_INDEX} has "
               "one line pointing to it. Sort them when you can.")
+    elif index_may_grow:
+        print(f"  - {pre}the old memory is copied first, so {MEMORY_INDEX} may pass "
+              f"the {_INDEX_MAX_LINES} lines / {_INDEX_MAX_BYTES // 1024} KB Claude "
+              f"Code loads; then the facts are listed in {MEMORY_DIR}/{BD_MEMORY_INDEX}")
 
 
 def setup_project_memory(project_dir: Path, dry_run: bool) -> None:
@@ -2439,6 +2484,7 @@ def setup_project_memory(project_dir: Path, dry_run: bool) -> None:
         return
     state = _set_memory_setting(project_dir, dry_run)
     old = old_memory_dir(project_dir)
+    copies_first = False
     if state == "set" and old is None:
         print("  - the path is too long to find the old memory folder under "
               f"{_claude_config_dir() / 'projects'}; copy it into {MEMORY_DIR} by hand")
@@ -2450,9 +2496,10 @@ def setup_project_memory(project_dir: Path, dry_run: bool) -> None:
             print("    Nothing there was removed; copy what is left by hand.")
         else:
             _report_migration(old, report, project_dir, dry_run)
+            copies_first = bool(report["copied"] or report["index_lines"])
     if state != "skip":
         try:
-            import_bd_memory(project_dir, dry_run)
+            import_bd_memory(project_dir, dry_run, dry_run and copies_first)
         except (OSError, ValueError) as e:
             print(f"  - could not import bd memory: {e}; bd keeps it, nothing lost")
     if not dry_run:

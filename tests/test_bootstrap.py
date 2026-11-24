@@ -415,6 +415,8 @@ class _Machine:
 
     def run(self, cmd, **kwargs):
         cmd = list(cmd)
+        if Path(cmd[0]).name == "bd":  # bd may run by the path which() found
+            cmd[0] = "bd"
         self.calls.append(cmd)
         if cmd[0] in self.MANAGERS:
             self.bd_present = self.installs_to_path
@@ -4944,8 +4946,21 @@ class TestBdMemoryIndexOverflow:
 
         index = read_verbatim(tmp_path / ".memory" / "MEMORY.md")
         assert index.count("](from-bd.md)") == 1
+        assert "](from-bd.md)" in index.splitlines()[0]
         side = read_verbatim(tmp_path / ".memory" / "from-bd.md")
         assert "- [a](a.md)" in side and "- [b](b.md)" in side
+
+    def test_the_pointer_goes_under_a_leading_heading(self, tmp_path, monkeypatch):
+        """Appended at line 201 it would be the one line Claude Code never reads."""
+        full = "# Memory\r\n" + "- [m](m.md)\r\n" * 199
+        write_verbatim(tmp_path / ".memory" / "MEMORY.md", full)
+        _bd_says(monkeypatch, {"a": "x"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        lines = read_verbatim(tmp_path / ".memory" / "MEMORY.md").split("\r\n")
+        assert lines[0] == "# Memory" and "](from-bd.md)" in lines[1]
+        assert lines[2:] == ["- [m](m.md)"] * 199 + [""]
 
     def test_an_import_that_fits_stays_in_memory_md(self, tmp_path, monkeypatch):
         write_verbatim(tmp_path / ".memory" / "MEMORY.md", "- [m](m.md)\n" * 190)
@@ -4968,6 +4983,27 @@ class TestBdMemoryDryRun:
         assert _snapshot(tmp_path) == before
         out = capsys.readouterr().out
         assert "[DRY-RUN]" in out and "imported 1 fact(s)" in out and "from-bd.md" in out
+
+    def test_old_memory_copied_first_is_owned_up_to(self, tmp_path, monkeypatch, capsys):
+        """A real run copies the old memory before the import, so MEMORY.md may
+        be fuller than the dry run sees: it says so instead of promising."""
+        old = tmp_path / "old-memory"
+        write_verbatim(old / "MEMORY.md", "- [o](o.md)\n" * 200)
+        monkeypatch.setattr(bootstrap, "old_memory_dir", lambda project_dir: old)
+        _bd_says(monkeypatch, {"a": "x"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=True)
+
+        out = capsys.readouterr().out
+        assert "imported 1 fact(s)" in out and "may" in out and "from-bd.md" in out
+
+    def test_no_old_memory_no_hedging(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(bootstrap, "old_memory_dir", lambda project_dir: None)
+        _bd_says(monkeypatch, {"a": "x"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=True)
+
+        assert "from-bd.md" not in capsys.readouterr().out
 
 
 class TestBdFileNames:
@@ -5062,6 +5098,74 @@ class TestReadBdMemories:
 
         assert [n for n in _memory_files(tmp_path) if n.endswith(".md")] == []
         assert "bd memory" not in capsys.readouterr().out
+
+
+class TestBdRunsWithoutAShell:
+    """Through cmd.exe a timeout kills the shell, not bd, and the run then
+    waits for bd anyway. bd runs by its full path, with no shell, unless it is
+    a .cmd/.bat wrapper that only a shell can start."""
+
+    def _fake(self, tmp_path, monkeypatch, found, windows=True):
+        (tmp_path / ".beads").mkdir(exist_ok=True)
+        monkeypatch.setattr(bootstrap, "_SHELL", windows)
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: found)
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append((list(cmd), kw.get("shell")))
+            out = b"{}" if "memories" in cmd else "bd version 1.1.0"
+            return SimpleNamespace(returncode=0, stdout=out, stderr=out[:0])
+        monkeypatch.setattr(bootstrap.subprocess, "run", run)
+        return calls
+
+    @pytest.mark.parametrize("call", ["version", "memories"])
+    def test_an_exe_runs_directly(self, tmp_path, monkeypatch, call):
+        exe = r"C:\Program Files\bd\bd.exe"
+        calls = self._fake(tmp_path, monkeypatch, exe)
+
+        if call == "version":
+            bootstrap.read_bd_version()
+        else:
+            _REAL_READ_BD(tmp_path)
+
+        assert calls == [([exe, call] + (["--json"] if call == "memories" else []), False)]
+
+    @pytest.mark.parametrize("wrapper", [r"C:\npm\bd.cmd", r"C:\npm\bd.BAT"])
+    def test_a_cmd_wrapper_needs_the_shell(self, tmp_path, monkeypatch, wrapper):
+        calls = self._fake(tmp_path, monkeypatch, wrapper)
+
+        _REAL_READ_BD(tmp_path)
+
+        assert calls == [([wrapper, "memories", "--json"], True)]
+
+    def test_no_shell_off_windows(self, tmp_path, monkeypatch):
+        calls = self._fake(tmp_path, monkeypatch, "/usr/bin/bd.cmd", windows=False)
+
+        bootstrap.read_bd_version()
+
+        assert calls == [(["/usr/bin/bd.cmd", "version"], False)]
+
+
+class TestBdKeysThatDifferOnlyByCase:
+    """Windows and macOS see Foo.md and foo.md as one file."""
+
+    def test_get_files_of_their_own(self, tmp_path, monkeypatch):
+        _bd_says(monkeypatch, {"Foo": "1", "foo": "2"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        names = [n for n in _memory_files(tmp_path) if n != "MEMORY.md"]
+        assert len({n.lower() for n in names}) == 2 == len(names)
+
+    def test_a_file_named_in_another_case_is_not_ours(self, tmp_path, monkeypatch):
+        write_verbatim(tmp_path / ".memory" / "Testing.md", "Claude wrote this\n")
+        _bd_says(monkeypatch, {"testing": "from bd"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert read_verbatim(tmp_path / ".memory" / "Testing.md") == "Claude wrote this\n"
+        assert read_verbatim(tmp_path / ".memory" / "testing-2.md").endswith("from bd\n")
 
 
 class TestBdMemoryInAFullRun:
