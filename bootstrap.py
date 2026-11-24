@@ -89,12 +89,17 @@ OBSOLETE_SETTINGS_HOOKS: list[str] = [
     # v3.6.0 hook revision — see OBSOLETE_FILES above.
     "enforce-branch-before-edit",
     "nudge-claude-md-update",
+    # `bd prime` prints all of bd's memory (hundreds of thousands of chars in
+    # big projects); Claude Code cuts hook output over 10k chars to 2k, so the
+    # hook only burns time. Some projects carry it here, not only in local.
+    "bd prime",
 ]
 
 # Substrings matched against hook command strings in
 # .claude/settings.local.json. Same semantics as OBSOLETE_SETTINGS_HOOKS.
-# `bd prime` used to be a SessionStart hook there; the templated global
-# settings.json now owns session bootstrapping, so legacy local entries go.
+# `bd prime` used to be a SessionStart hook there (and in some projects in
+# settings.json too — see OBSOLETE_SETTINGS_HOOKS); the templated settings.json
+# now owns session bootstrapping, so legacy entries go from both files.
 OBSOLETE_LOCAL_SETTINGS_PATTERNS: list[str] = [
     "bd prime",
 ]

@@ -862,6 +862,41 @@ class TestCleanupObsolete:
         backup_root = Path(report["backups"][0])
         assert (backup_root / "obsolete" / "settings.json").exists()
 
+    def test_strips_bd_prime_from_shared_settings(self, tmp_path, monkeypatch):
+        """`bd prime` in .claude/settings.json goes too, other hooks stay.
+
+        Uses the real OBSOLETE_SETTINGS_HOOKS list: several projects carry
+        `bd prime` in settings.json, not only in settings.local.json.
+        """
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_DIRS", [])
+
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings = claude_dir / "settings.json"
+        settings.write_text(json.dumps({
+            "hooks": {
+                "SessionStart": [
+                    {"hooks": [{"type": "command", "command": "bd prime"}]},
+                    {"hooks": [{"type": "command", "command": "node .claude/hooks/session-start.cjs"}]},
+                ],
+                "PreCompact": [
+                    {"hooks": [{"type": "command", "command": "bd prime"}]},
+                ],
+            }
+        }))
+
+        report = cleanup_obsolete(tmp_path, {"files": {}}, dry_run=False)
+
+        assert len(report["stripped_settings_hooks"]) == 2
+        updated = json.loads(settings.read_text())
+        commands = [h["hooks"][0]["command"]
+                    for entries in updated.get("hooks", {}).values()
+                    for h in entries]
+        assert commands == ["node .claude/hooks/session-start.cjs"]
+        backup_root = Path(report["backups"][0])
+        assert (backup_root / "obsolete" / "settings.json").exists()
+
     def test_removes_manifest_dir_with_nested_entries(self, tmp_path, monkeypatch):
         """Directory removal also strips matching manifest entries."""
         monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [])
