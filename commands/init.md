@@ -6,7 +6,7 @@ argument-hint: "[--lang ru] [--no-rules] [--install-beads] [--shared-memory new|
 Install Claude Protocol into the current project.
 
 The plugin already carries the hooks, the agents and the skills
-(project-discovery and bead-review) — Claude Code loads those itself. What it
+(project-discovery, bead-review and memory-sort) — Claude Code loads those itself. What it
 cannot carry is the part that has to live in the project: the beads database,
 `.claude/rules/*.md` and the block in `CLAUDE.md`. That is what this command
 installs.

@@ -4793,8 +4793,15 @@ def _bd_says(monkeypatch, memories):
 
 
 def _memory_files(project):
+    """The memory's files, without the list of keys imported before."""
     folder = project / ".memory"
-    return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
+    return sorted(p.name for p in folder.iterdir()
+                  if p.name != bootstrap.BD_IMPORTED) if folder.is_dir() else []
+
+
+def _imported(project):
+    path = project / ".memory" / bootstrap.BD_IMPORTED
+    return read_verbatim(path).splitlines() if path.exists() else None
 
 
 class TestBdMemoryImport:
@@ -4864,7 +4871,7 @@ class TestBdMemoryImportRepeat:
         bootstrap.setup_project_memory(tmp_path, dry_run=False)
 
         assert _snapshot(tmp_path / ".memory") == before
-        assert "already in .memory" in capsys.readouterr().out
+        assert "imported before" in capsys.readouterr().out
 
     def test_only_new_entries_come_in(self, tmp_path, monkeypatch):
         _bd_says(monkeypatch, {"a": "x"})
@@ -4905,6 +4912,107 @@ class TestBdMemoryImportRepeat:
         bootstrap.setup_project_memory(tmp_path, dry_run=False)
 
         assert len(_memory_files(tmp_path)) == 3
+
+
+class TestBdImportedKeys:
+    """.memory/.bd-imported lists every key imported once: a fact sorted out of
+    .memory - moved to shared memory or dropped - never comes back from bd,
+    which keeps its own copy."""
+
+    def _forget(self, project, name):
+        (project / ".memory" / name).unlink()
+        index = project / ".memory" / "MEMORY.md"
+        write_verbatim(index, "".join(
+            line for line in read_verbatim(index).splitlines(keepends=True)
+            if f"]({name})" not in line))
+
+    @pytest.mark.parametrize("keys, bom", [
+        ({"a": "x", "b": "y"}, True),
+        ({"a": "x", " c ": "z"}, False),
+    ], ids=["bom-in-list", "key-with-spaces"])
+    def test_an_edited_list_still_keeps_sorted_facts_out(
+            self, tmp_path, monkeypatch, keys, bom):
+        _bd_says(monkeypatch, keys)
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        listed = tmp_path / ".memory" / ".bd-imported"
+        if bom:
+            listed.write_bytes(b"\xef\xbb\xbf" + listed.read_bytes())
+        for name in _memory_files(tmp_path):
+            if name != "MEMORY.md":
+                self._forget(tmp_path, name)
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _memory_files(tmp_path) == ["MEMORY.md"]
+
+    def test_the_import_lists_the_keys_it_brought(self, tmp_path, monkeypatch):
+        _bd_says(monkeypatch, {"b": "y", "a": "x"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _imported(tmp_path) == ["a", "b"]
+
+    def test_a_sorted_out_fact_does_not_come_back(self, tmp_path, monkeypatch, capsys):
+        _bd_says(monkeypatch, {"a": "x", "b": "y"})
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        self._forget(tmp_path, "a.md")
+        before = _snapshot(tmp_path / ".memory")
+        capsys.readouterr()
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _snapshot(tmp_path / ".memory") == before
+        assert _memory_files(tmp_path) == ["MEMORY.md", "b.md"]
+        assert "imported before" in capsys.readouterr().out
+
+    def test_a_new_key_still_comes_in(self, tmp_path, monkeypatch):
+        _bd_says(monkeypatch, {"a": "x"})
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        self._forget(tmp_path, "a.md")
+        _bd_says(monkeypatch, {"a": "x", "b": "y"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _memory_files(tmp_path) == ["MEMORY.md", "b.md"]
+        assert _imported(tmp_path) == ["a", "b"]
+
+    def test_an_older_memory_without_the_list_gets_one_from_its_files(
+            self, tmp_path, monkeypatch):
+        """Imported before the list existed: bd_key in the files is the record."""
+        folder = tmp_path / ".memory"
+        write_verbatim(folder / "a.md", bootstrap._bd_memory_file("a", "x"))
+        write_verbatim(folder / "mine.md", "Claude wrote this\n")
+        write_verbatim(folder / "MEMORY.md", "- [a](a.md) — x\n")
+        _bd_says(monkeypatch, {"a": "x", "b": "y"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _imported(tmp_path) == ["a", "b"]
+        self._forget(tmp_path, "a.md")
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        assert _memory_files(tmp_path) == ["MEMORY.md", "b.md", "mine.md"]
+
+    def test_nothing_new_still_writes_the_seeded_list(self, tmp_path, monkeypatch):
+        folder = tmp_path / ".memory"
+        write_verbatim(folder / "a.md", bootstrap._bd_memory_file("a", "x"))
+        write_verbatim(folder / "MEMORY.md", "- [a](a.md) — x\n")
+        _bd_says(monkeypatch, {"a": "x"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _imported(tmp_path) == ["a"]
+
+    def test_a_dry_run_writes_no_list(self, tmp_path, monkeypatch):
+        folder = tmp_path / ".memory"
+        write_verbatim(folder / "a.md", bootstrap._bd_memory_file("a", "x"))
+        write_verbatim(folder / "MEMORY.md", "- [a](a.md) — x\n")
+        _bd_says(monkeypatch, {"a": "x", "b": "y"})
+        before = _snapshot(tmp_path)
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=True)
+
+        assert _snapshot(tmp_path) == before
+        assert _imported(tmp_path) is None
 
 
 class TestBdMemoryIndexOverflow:
@@ -5176,3 +5284,42 @@ class TestBdMemoryInAFullRun:
 
         assert (tmp_path / ".memory" / "k.md").exists()
         assert "- [k](k.md)" in read_verbatim(tmp_path / ".memory" / "MEMORY.md")
+
+
+# ============================================================================
+# The memory-sort skill
+# ============================================================================
+# Sorting project memory into shared memory is a judgement call, so it ships
+# as a skill: the plugin loads it from templates/skills, npx copies it. Its
+# route test must stay the one in the shared-memory block, not a second one.
+
+MEMORY_SORT_KEY = "skills/memory-sort/SKILL.md"
+ROUTE_QUESTION = "will this help in another project?"
+
+
+class TestMemorySortSkill:
+    def test_it_is_shipped_and_handed_to_the_plugin(self):
+        assert MEMORY_SORT_KEY in bootstrap.shipped_skill_files()
+        assert f".claude/{MEMORY_SORT_KEY}" in bootstrap.plugin_provided_relpaths()
+
+    def test_its_name_matches_its_directory(self):
+        text = read_verbatim(TEMPLATES_DIR / MEMORY_SORT_KEY)
+        assert text.startswith("---\n")
+        front = text.split("---", 2)[1]
+        assert re.search(r"^name: memory-sort$", front, re.M)
+        description = re.search(r"^description: (.+)$", front, re.M).group(1)
+        for trigger in ("разбери память", "что перенести в общую память"):
+            assert trigger in description
+
+    def test_it_reuses_the_route_test_of_the_shared_memory_block(self):
+        skill = read_verbatim(TEMPLATES_DIR / MEMORY_SORT_KEY)
+        block = read_verbatim(TEMPLATES_DIR / "shared-memory" / "CLAUDE-block.md")
+        assert ROUTE_QUESTION in block, "the block's wording moved; update the skill"
+        assert ROUTE_QUESTION in skill
+
+    def test_it_reads_the_state_file_bootstrap_writes(self):
+        skill = read_verbatim(TEMPLATES_DIR / MEMORY_SORT_KEY)
+        assert bootstrap.SHARED_MEMORY_STATE in skill
+        assert "shared_memory" in skill
+        assert set(bootstrap.SHARED_MEMORY_CHOICES) == {"existing", "new", "local", "never"}
+        assert "`choice` is `existing`, `new` or `local`" in skill
