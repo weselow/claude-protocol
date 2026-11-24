@@ -40,11 +40,12 @@ or inside Claude Code from marketplace:
 
 Claude Code loses context. Plans disappear after compaction. Tasks are forgotten between sessions. Changes go straight to main with no traceability.
 
-Claude Protocol fixes this with three things:
+Claude Protocol fixes this with four things:
 
 - **Beads** — persistent task tracking. One task = one worktree = one PR. Survives restarts and compaction.
 - **Hooks** — enforcement, not instructions. Edits on main are blocked. Completion without checklist is blocked. `git --no-verify` is blocked.
 - **Session start** — a hook lists the beads in progress, ready, blocked and stale, so state survives context loss.
+- **Memory** — lessons live in `.memory/` in the project and in one shared memory for every project and machine. Agents are told where both are.
 
 Constraints over instructions. What's blocked can't be ignored.
 
@@ -316,8 +317,8 @@ Full details: [docs/decisions-en.md](docs/decisions-en.md)
   agents/
     code-reviewer.md        # Reviews a bead, following bead-review
     merge-supervisor.md     # Conflict resolution protocol
-  hooks/                    # 3 Node.js enforcement hooks, shared utils,
-                            # and the update checker they spawn
+  hooks/                    # 4 Node.js hooks (3 enforcement, 1 memory
+                            # pointer), shared utils, the update checker
   rules/
     beads-workflow.md       # Task lifecycle, bd command reference
     pre-code-workflow.md    # Three gates before any edit
@@ -332,14 +333,17 @@ Full details: [docs/decisions-en.md](docs/decisions-en.md)
     bead-review/            # Review procedure and the request form
     memory-sort/            # Moves project memory into shared memory
   settings.json             # Hook configuration
+  settings.local.json       # autoMemoryDirectory → .memory
   .manifest.json            # File hashes for safe upgrades
 CLAUDE.md                   # Orchestrator instructions
-.beads/                     # Task database + knowledge base
+.beads/                     # Task database
+.memory/                    # Project memory: MEMORY.md + a file per fact
+~/.claude/shared-memory/    # Shared memory, one per machine (optional)
 ```
 
-That is the `npx` install. As a plugin, only `rules/`, `.manifest.json`,
-`CLAUDE.md` and `.beads/` land in the project — the hooks, the agents and the
-skills stay in the plugin, which is what lets them update on their own.
+That is the `npx` install. As a plugin, only `rules/`, `settings.local.json`,
+`.manifest.json`, `CLAUDE.md`, `.beads/` and `.memory/` land in the project —
+the hooks, the agents and the skills stay in the plugin, which is what lets them update on their own.
 
 ### Safe for existing projects — and for upgrades
 
@@ -370,11 +374,51 @@ First, each only when there is something to say:
   command to update it
 - **A newer claude-protocol** — checked at most once a day, in a process of
   its own with a time limit, and silent on any failure
+- **Shared memory not updated** — `git pull --ff-only` of the shared memory
+  failed: no network, or local commits in the way. The pull runs beside the
+  other checks, for at most 5 seconds, and never asks for a password
+- **Project memory** — in a session opened inside a worktree: the path to
+  the main checkout's `.memory/MEMORY.md`, because such a session keeps its
+  auto memory elsewhere
 
 **Task Status** comes last — the beads in progress, ready, blocked and stale
 (no activity in 3 days): the first few of each, and how many more. It is
 always printed: with no beads it says so, and when bd does not answer it says
 that instead, so an empty list and a silent bd never look alike.
+
+### Memory
+
+Two memories, one format: a file per fact with a frontmatter header, and one
+line per file in `MEMORY.md`.
+
+- **Project memory** — `.memory/` in the project, for what matters to this
+  project only. Bootstrap points `autoMemoryDirectory` at it and imports
+  `@.memory/MEMORY.md` in the CLAUDE.md block. A public repository, or one
+  whose visibility `gh` cannot tell, gets `/.memory/` in `.gitignore`; a
+  private one commits it.
+- **Shared memory** — `~/.claude/shared-memory`, for what helps in any
+  project: your preferences, shared infrastructure, lessons about tools. One
+  per machine, usually a private git repository (`<login>/claude-memory`).
+  init asks once; `--shared-memory` answers without the question.
+- **Where to write** — a marked block in `~/.claude/CLAUDE.md`: "will this
+  help in another project?" Yes — shared; not sure — project. Never
+  passwords, tokens or keys.
+
+What keeps them in reach:
+
+- **Session start** pulls the shared memory and, in a worktree session,
+  names the main checkout's `.memory/MEMORY.md`.
+- **`memory-pointer`** gives each agent one line with both `MEMORY.md`
+  paths. Not the indexes themselves: what a task needs goes in the bead.
+- **init and upgrade** move the old memory from
+  `~/.claude/projects/<key>/memory` and every `bd memories` entry into
+  `.memory/`. Nothing is overwritten, bd keeps its copy, and an imported
+  fact never comes back once moved or dropped.
+- **`/memory-sort`** (`/claude-protocol:memory-sort` with the plugin)
+  proposes which project-memory files belong in shared memory. Only what
+  you confirm moves.
+- **Closing a session** — Claude says what it wrote and where, and offers
+  to move this session's lessons that fit other projects to shared memory.
 
 ### Project discovery
 
@@ -672,6 +716,15 @@ A: Rules, agents and skills you edited become a question, one file at a time, wi
 
 **Q: Can I use this without Dolt?**
 A: Yes. Beads works with SQLite by default. Dolt adds version history and branching for the task database.
+
+**Q: Where does memory live, and how does it get to another machine?**
+A: Project memory is `.memory/` in the project: a private repository commits it, a public one ignores it and keeps it local. Shared memory is `~/.claude/shared-memory`. As a git repository it is pushed after each write and pulled at session start; on a new machine connect the same repository: `npx claude-protocol init --shared-memory existing <url>`.
+
+**Q: I answered "not now". How do I set up shared memory later?**
+A: The question is not asked again, but the flag works: `npx claude-protocol init --shared-memory new` (or `existing <url>`, `local`). Once shared memory is set up, the flag is ignored.
+
+**Q: What happened to `bd remember`?**
+A: The rules no longer use it. Lessons go to project or shared memory, as the block in `~/.claude/CLAUDE.md` says. init and upgrade copy every `bd memories` entry into `.memory/`; bd keeps its own copy as a backup.
 
 ## Credits
 
