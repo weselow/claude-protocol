@@ -38,8 +38,8 @@ _SHELL = sys.platform == "win32"
 SCRIPT_DIR = Path(__file__).parent.resolve()
 TEMPLATES_DIR = SCRIPT_DIR / "templates"
 
-# The oldest beads CLI the rules work against: they call bd memories, bd
-# remember, bd worktree and bd prime. Keep in sync with BD_MIN_VERSION in
+# The oldest beads CLI the rules work against: they call bd worktree and
+# bd prime. Keep in sync with BD_MIN_VERSION in
 # templates/hooks/hook-utils.cjs — a test asserts the two agree, because two
 # copies of a constant in two languages drift silently.
 BD_MIN_VERSION = "1.1.0"
@@ -1293,7 +1293,7 @@ def warn_if_bd_outdated() -> bool:
         return True
     if version_below(found, BD_MIN_VERSION):
         print(f"  - WARNING: bd {found} is older than {BD_MIN_VERSION}, which the"
-              " rules rely on (bd memories, bd remember, bd worktree, bd prime)")
+              " rules rely on (bd worktree, bd prime)")
         print("    Update it: npm install -g @beads/bd@latest")
         return False
     return True

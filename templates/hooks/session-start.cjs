@@ -16,7 +16,7 @@ const {
   injectText, execCommand, execCommandJSON, execCommandJSONAsync, getProjectDir, runHook,
   parseBdVersion, versionBelow, BD_MIN_VERSION,
   hasBeads, isPluginInstall, readOwnVersion, updateNotice,
-  leftoverProjectHooks,
+  leftoverProjectHooks, execCommandAsync, sharedMemoryDir, quietGitEnv,
 } = require('./hook-utils.cjs');
 
 // Up here, not with the functions using them: the hook body below starts
@@ -31,6 +31,9 @@ const BEAD_ID = /^[\p{L}\p{N}._-]+$/u;
 // and execCommand's 10 s default dropped a list without a word. The output
 // grows with the beads, whole descriptions included, hence the larger buffer.
 const BD_LIST_OPTIONS = { timeout: 30000, maxBuffer: 64 * 1024 * 1024 };
+// How long the shared memory pull may take. It runs beside everything else,
+// so a slow network costs at most this, and only when nothing else is slower.
+const PULL_TIMEOUT = 5000;
 // The most beads a list is asked for; `bd blocked` takes no limit.
 const LIST_LIMIT = 50;
 // name and hint make the heading, `shown` is how many beads are printed, and
@@ -49,9 +52,15 @@ const TASK_LISTS = [
 ];
 
 runHook('session-start', async () => {
-  const projectDir = getProjectDir();
-  if (!hasBeads()) return reportNoBeads();
+  // Started first and in every project, beads or not: shared memory serves
+  // them all, and the pull talks to the network while the rest runs.
+  const memoryPull = pullSharedMemory();
+  if (!hasBeads()) {
+    reportNoBeads();
+    return injectLines(await memoryPull);
+  }
 
+  const projectDir = getProjectDir();
   const output = [];
   const repoRoot = execCommand('git', ['-C', projectDir, 'rev-parse', '--show-toplevel']);
 
@@ -67,12 +76,49 @@ runHook('session-start', async () => {
   collectOpenPrs(repoRoot, output);
   reportTaskLists(await taskLists, output);
 
-  injectText(output.join('\n') + '\n');
+  // Awaited last: the pull has been running all along, and its warning, if
+  // any, still goes first.
+  injectText([...await memoryPull, ...output].join('\n') + '\n');
 });
 
 // ---------------------------------------------------------------------------
 // Sections
 // ---------------------------------------------------------------------------
+
+function injectLines(lines) {
+  if (lines.length > 0) injectText(lines.join('\n') + '\n');
+}
+
+/**
+ * git pull --ff-only of the shared memory, when it is a clone with something
+ * to pull from. Resolves to the lines to print: none when it worked or there
+ * was nothing to do, one warning when it failed — no network, or local
+ * commits a fast-forward cannot get past. It never waits beyond PULL_TIMEOUT
+ * and never asks for a password: there is nobody to answer at a hook.
+ *
+ * Not async on purpose: the local questions are asked synchronously and the
+ * pull is spawned before this returns. Asked through promises, the pull
+ * would start only once the event loop is free — after the synchronous
+ * checks it is meant to run beside.
+ */
+function pullSharedMemory() {
+  const dir = sharedMemoryDir();
+  if (!dir || !fs.existsSync(path.join(dir, '.git'))) return Promise.resolve([]);
+  const git = (args) => execCommand('git', ['-C', dir, ...args], { cwd: dir });
+  // A folder made with no remote, or one never pushed, has no upstream.
+  if (!git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])) return Promise.resolve([]);
+  const env = quietGitEnv(process.env, Boolean(git(['config', '--get', 'core.sshCommand'])));
+  return execCommandAsync('git', ['-C', dir, 'pull', '--ff-only', '--quiet'], {
+    cwd: dir, timeout: PULL_TIMEOUT, env,
+  }).then(out => (out !== null ? [] : pullWarning(dir)));
+}
+
+function pullWarning(dir) {
+  return [
+    `WARNING: shared memory not updated — git pull --ff-only failed in ${dir} (no network, or local commits in the way).`,
+    '',
+  ];
+}
 
 /**
  * A copy installed under a project's .claude/hooks/ is there because someone
@@ -97,7 +143,7 @@ function collectOutdatedBd(output) {
   if (!versionBelow(found, BD_MIN_VERSION)) return;
 
   output.push(`WARNING: bd ${found} is older than ${BD_MIN_VERSION}, which the rules rely on`);
-  output.push('   (bd memories, bd remember, bd worktree, bd prime).');
+  output.push('   (bd worktree, bd prime).');
   output.push('   Update it: npm install -g @beads/bd@latest');
   output.push('');
 }

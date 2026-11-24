@@ -58,9 +58,11 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+- **Memory hooks: shared memory pulled at session start, agents told where memory is** — session-start runs `git pull --ff-only` on the shared memory when it is a clone with an upstream, beside the other checks and for at most 5 seconds, never stopping to ask for a password; no network or local commits in the way — one warning line, the session goes on. A new `memory-pointer` hook (SubagentStart) gives each agent one line naming `<project>/.memory/MEMORY.md` and the shared `MEMORY.md`, whichever exist and are not empty — the main checkout's `.memory` also from inside a worktree; nothing when there is no memory. A pointer, not the indexes: what a task needs goes in the bead.
 - **Project memory moves into `.memory/` in the project** — bootstrap sets `autoMemoryDirectory` in `.claude/settings.local.json`, copies the old memory from `~/.claude/projects/<key>/memory` (a file that differs is never overwritten: the old one goes beside it as `*.from-old-memory.md`; `MEMORY.md` is merged line by line; the old folder stays), and imports `@.memory/MEMORY.md` in the managed CLAUDE.md block so agents see the index too. A public repository, or one whose visibility `gh` cannot tell, gets `/.memory/` in `.gitignore`; a private one commits it.
 - **Shared memory, one per machine** — init and upgrade ask once: connect an existing repository, create a private `<login>/claude-memory` with gh, use a local folder without git, or not now (remembered). The folder is `~/.claude/shared-memory` (`CLAUDE_CONFIG_DIR` respected); a marked block in `~/.claude/CLAUDE.md` says which memory to write to and loads its `MEMORY.md`. Nothing outside the markers is touched, and the file is backed up to `~/.claude/claude-protocol-backups/` before each change. Runs nobody can answer (`--all`, CI, the plugin's `/claude-protocol:init`) ask nothing and print the flag instead: `--shared-memory existing <url> | new | local | never`.
 - **bd memory moves into `.memory/` too** — init and upgrade copy each `bd memories` entry into a file of its own (frontmatter `metadata.type: project`, `source: bd`, `bd_key`) with a line in `MEMORY.md`. A second run skips what is already there; a file of the same name that holds something else is never overwritten. When the lines would push `MEMORY.md` past the 200 lines / 25 KB Claude Code loads, they go to `.memory/from-bd.md` and `MEMORY.md` gets one line pointing to it. bd keeps its copy (`bd forget` is never called); no bd or no `.beads` — the step is skipped silently.
+- **Rules send lessons to project and shared memory, not to bd** — `debugging-standard`, `pre-code-workflow` and `beads-workflow` now say "search project memory (`.memory/`) and shared memory" and "record the lesson where the "Memory: where to write" block in `~/.claude/CLAUDE.md` says (no shared memory set up — project memory)" instead of `bd memories` / `bd remember`; the worklog table gets two rows, project memory and shared. bd's memory is not wiped and stays as a backup. A finding filed along the way is now linked to its bead with `--deps discovered-from:<bead>`, so findings can be listed by that bead. The bd 1.1.0 minimum stays, for `bd worktree` and `bd prime`.
 - **Upgrade removes `bd prime` from `.claude/settings.json` too** — before, only `settings.local.json` was cleaned; the hook dumps all of bd's memory, which Claude Code cuts to 2,000 characters anyway.
 
 ### v3.10.0 (2026-09-17)
@@ -408,8 +410,8 @@ directory is not on this shell's PATH, so open a new terminal and try again.
 
 **When `bd` is older than 1.1.0**, the installer warns and keeps going, and the
 session-start hook repeats the warning once per session. Nothing is updated for
-you — the rules need `bd memories`, `bd remember`, `bd worktree` and `bd prime`,
-and an old `bd` fails those one at a time with no explanation.
+you — the rules need `bd worktree` and `bd prime`, and an old `bd` fails those
+one at a time with no explanation.
 
 ### Install as a plugin
 
@@ -618,7 +620,8 @@ can follow it too.
 |------|-------|-------------|
 | bash-guard | PreToolUse (Bash) | Blocks `--no-verify` and raw `git worktree add`. Requires description on `bd create`. Validates epic close (all children done, PR merged). Every command in a chain is checked, not just the first. |
 | validate-completion | SubagentStop | Holds a completion report to the facts: checklist ticked, worktree committed, branch pushed. Blocks in every permission mode. |
-| session-start | SessionStart | Beads in progress, ready, blocked and stale; dirty main checkout, worktrees of merged branches, open PRs, a `bd` older than the rules need, a newer claude-protocol. |
+| session-start | SessionStart | Beads in progress, ready, blocked and stale; dirty main checkout, worktrees of merged branches, open PRs, a `bd` older than the rules need, a newer claude-protocol; pulls the shared memory. |
+| memory-pointer | SubagentStart | One line for each agent: where the project memory (`.memory/MEMORY.md` of the main checkout) and the shared memory are. Silent when there is none. |
 | update-check | — | Not a hook: the helper `session-start` spawns so the version check gets a time limit of its own. Answer cached for a day; silent on any failure. |
 | hook-utils | — | Shared utilities: project-dir resolution, command splitting, deny/ask/block, execCommand. |
 

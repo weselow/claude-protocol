@@ -1392,3 +1392,31 @@ describe('runHook with an asynchronous body', () => {
     expect(result.log).toBe('');
   });
 });
+
+describe('quietGitEnv', () => {
+  const { quietGitEnv } = require('../../templates/hooks/hook-utils.cjs');
+
+  it('turns off every prompt git could wait on', () => {
+    const env = quietGitEnv({ PATH: '/bin' }, false);
+
+    expect(env.PATH).toBe('/bin');
+    expect(env.GIT_TERMINAL_PROMPT).toBe('0');
+    expect(env.GCM_INTERACTIVE).toBe('never');
+    expect(env.GIT_SSH_COMMAND).toBe('ssh -o BatchMode=yes');
+  });
+
+  it('keeps an ssh command the user set in the environment', () => {
+    expect(quietGitEnv({ GIT_SSH_COMMAND: 'ssh -i key' }, false).GIT_SSH_COMMAND).toBe('ssh -i key');
+    expect(quietGitEnv({ GIT_SSH: 'plink' }, false).GIT_SSH_COMMAND).toBeUndefined();
+  });
+
+  it('leaves core.sshCommand in charge when the repository sets one', () => {
+    expect(quietGitEnv({}, true).GIT_SSH_COMMAND).toBeUndefined();
+  });
+
+  it('does not change the environment it was given', () => {
+    const given = {};
+    quietGitEnv(given, false);
+    expect(given).toEqual({});
+  });
+});

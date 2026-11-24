@@ -21,6 +21,16 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/templates/hooks/memory-pointer.cjs\""
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

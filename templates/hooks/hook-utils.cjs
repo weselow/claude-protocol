@@ -21,8 +21,8 @@ const path = require('path');
 // Module-level permission mode — set by readStdinJSON(), read by deny()/ask()
 let _permissionMode = '';
 
-// The oldest beads CLI the rules work against: they call bd memories, bd
-// remember, bd worktree and bd prime. Keep in sync with BD_MIN_VERSION in
+// The oldest beads CLI the rules work against: they call bd worktree and
+// bd prime. Keep in sync with BD_MIN_VERSION in
 // bootstrap.py — a test asserts the two agree, because two copies of a
 // constant in two languages drift silently.
 const BD_MIN_VERSION = '1.1.0';
@@ -672,7 +672,7 @@ function pluginActiveHere(projectDir) {
 // settings was installed from npx before the plugin arrived.
 const PLUGIN_PROVIDED_HOOKS = [
   'bash-guard.cjs', 'validate-completion.cjs', 'session-start.cjs',
-  'update-check.cjs',
+  'update-check.cjs', 'memory-pointer.cjs',
 ];
 
 /**
@@ -926,6 +926,92 @@ function runHook(hookName, fn) {
 }
 
 // ---------------------------------------------------------------------------
+// Memory: the project's .memory and the machine's shared memory
+// ---------------------------------------------------------------------------
+
+/** Claude Code's own folder: CLAUDE_CONFIG_DIR, or ~/.claude. */
+function claudeConfigDir() {
+  return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+}
+
+/**
+ * The shared memory folder bootstrap set up, or null.
+ *
+ * bootstrap keeps the answer in <config>/claude-protocol.json, key
+ * shared_memory = { choice, path, remote }. "never", no answer, an unreadable
+ * file or a folder that is gone all mean there is none.
+ */
+function sharedMemoryDir() {
+  let state;
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(claudeConfigDir(), 'claude-protocol.json'), 'utf8'));
+    state = data && data.shared_memory;
+  } catch {
+    return null;
+  }
+  if (!state || !['existing', 'new', 'local'].includes(state.choice)) return null;
+  if (typeof state.path !== 'string' || !path.isAbsolute(state.path)) return null;
+  try {
+    return fs.statSync(state.path).isDirectory() ? state.path : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The main checkout's root, also from inside a linked worktree.
+ *
+ * .memory is often kept out of git (a public repository), so a worktree has
+ * none of its own: the one that counts is the main checkout's. Every worktree
+ * shares the main checkout's .git, which --git-common-dir names. Outside git,
+ * or for a layout where that is not <root>/.git, the folder itself.
+ */
+function mainCheckoutRoot(dir) {
+  const common = execCommand('git', ['-C', dir, 'rev-parse', '--git-common-dir'], { cwd: dir });
+  if (!common) return dir;
+  const gitDir = path.resolve(dir, common);
+  return path.basename(gitDir) === '.git' ? path.dirname(gitDir) : dir;
+}
+
+/**
+ * The index when it holds something. bootstrap creates the shared MEMORY.md
+ * empty, and a pointer to an empty file sends an agent to read nothing.
+ */
+function nonEmptyIndex(index) {
+  try {
+    return fs.readFileSync(index, 'utf8').trim() ? index : null;
+  } catch {
+    return null;
+  }
+}
+
+/** <main checkout>/.memory/MEMORY.md when it has something in it, or null. */
+function projectMemoryIndex(projectDir) {
+  return nonEmptyIndex(path.join(mainCheckoutRoot(projectDir), '.memory', 'MEMORY.md'));
+}
+
+/** <shared memory>/MEMORY.md when it has something in it, or null. */
+function sharedMemoryIndex() {
+  const dir = sharedMemoryDir();
+  return dir ? nonEmptyIndex(path.join(dir, 'MEMORY.md')) : null;
+}
+
+/**
+ * `env` for a git that talks to a remote with nobody to answer it: no
+ * terminal prompt, no Git Credential Manager window, no ssh password or
+ * host-key question. An ssh command the user chose — GIT_SSH_COMMAND, GIT_SSH,
+ * or core.sshCommand in the repository (`sshCommandConfigured`) — is left in
+ * charge: GIT_SSH_COMMAND would override it, and with it the key it names.
+ */
+function quietGitEnv(env, sshCommandConfigured) {
+  const quiet = { ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
+  if (!env.GIT_SSH_COMMAND && !env.GIT_SSH && !sshCommandConfigured) {
+    quiet.GIT_SSH_COMMAND = 'ssh -o BatchMode=yes';
+  }
+  return quiet;
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -962,4 +1048,10 @@ module.exports = {
   isSubagent,
   logError,
   runHook,
+  claudeConfigDir,
+  sharedMemoryDir,
+  mainCheckoutRoot,
+  projectMemoryIndex,
+  sharedMemoryIndex,
+  quietGitEnv,
 };
