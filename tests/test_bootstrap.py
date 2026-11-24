@@ -4268,6 +4268,16 @@ class TestRepoVisibility:
         assert _REAL_REPO_VISIBILITY(tmp_path) is None
         assert not [c for c in calls if c[0] == "gh"]
 
+    @pytest.mark.parametrize("url", [
+        "https://github.com/me/a&b",
+        "git@github.com:me/a|b.git",
+    ], ids=["ampersand", "pipe"])
+    def test_shell_characters_in_origin_are_unknown(self, tmp_path, monkeypatch, url):
+        # On Windows gh runs through cmd, which would read these unquoted.
+        calls = self._with(monkeypatch, origin=(0, url + "\n"))
+        assert _REAL_REPO_VISIBILITY(tmp_path) is None
+        assert not [c for c in calls if c[0] == "gh"]
+
     def test_git_fails_to_start(self, tmp_path, monkeypatch):
         self._with(monkeypatch, origin=OSError("no git"))
         assert _REAL_REPO_VISIBILITY(tmp_path) is None

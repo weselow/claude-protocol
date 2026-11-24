@@ -2044,7 +2044,7 @@ def old_memory_dir(project_dir: Path) -> Path | None:
 _REMOTE_URL = re.compile(
     r"^(?:[a-z+]+://(?:[^@/]+@)?(?P<h1>[^/:]+)(?::\d+)?/"
     r"|[^@/]+@(?P<h2>[^/:]+):)"
-    r"(?P<path>[^/]+/[^/]+?)(?:\.git)?/?$",
+    r"(?P<path>[\w.-]+/[\w.-]+?)(?:\.git)?/?$",
     re.IGNORECASE,
 )
 
