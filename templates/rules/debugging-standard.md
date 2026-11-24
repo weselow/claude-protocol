@@ -15,7 +15,7 @@ Don't fight an error by repeating the same action. If your fix didn't work — d
 3. **Web (only if the above didn't help):** search the error wording + context (language, framework, version)
 4. **3+ alternatives:** formulate at least three alternative fixes (see also Rule of 3 Alternatives in `implementation-standard.md`)
 5. **Pick:** the simplest working option, not the first one that came to mind
-6. **After the fix:** record the lesson by the route rule (project or shared memory) — the specific root cause and fix, so it can be found next time
+6. **After the fix:** record the lesson — the specific root cause and fix, so it can be found next time — where the "Memory: where to write" block in `~/.claude/CLAUDE.md` says (project or shared memory); no shared memory set up — write it to project memory (`.memory/`)
 
 ## Banned
 

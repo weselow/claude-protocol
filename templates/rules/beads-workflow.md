@@ -37,7 +37,7 @@ bd create "Fix: [what]" -d "[details]" --deps discovered-from:{CURRENT_BEAD}
 ```
 
 The `discovered-from` link, not just words in the description, ties the
-finding to the bead it came from — it can be searched by.
+finding to the bead it came from, so findings can be listed by that bead.
 
 Never leave it silent: either the change is in a commit, or there is a bead.
 
