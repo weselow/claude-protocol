@@ -1687,12 +1687,16 @@ def _in_style_of(text: str, addition: str) -> str:
     return addition.replace("\n", "\r\n") if "\r\n" in text else addition
 
 
-def marked_span(text: str) -> tuple:
-    """(start, end) of our marked region, markers included, or None."""
-    begin = _BEGIN_RE.search(text)
+def marked_span(text: str, begin_re=_BEGIN_RE, end_re=_END_RE) -> tuple:
+    """(start, end) of our marked region, markers included, or None.
+
+    The project CLAUDE.md block by default; the shared-memory block in the
+    user's CLAUDE.md passes its own pair of markers.
+    """
+    begin = begin_re.search(text)
     if not begin:
         return None
-    end = _END_RE.search(text, begin.end())
+    end = end_re.search(text, begin.end())
     return (begin.start(), end.end()) if end else None
 
 
@@ -2232,6 +2236,311 @@ def run_batch_upgrade(
     return 0
 
 
+# ============================================================================
+# Shared memory — one per machine, for every project
+# ============================================================================
+# The first thing bootstrap writes outside a project: a folder for memory that
+# helps in more than one project, and a marked block in the user's own
+# CLAUDE.md that says where to write and loads the index. Asked once per
+# machine; the answer lives in the user's Claude config folder, not in any
+# project. Everything outside our markers in that CLAUDE.md is the user's.
+
+SHARED_MEMORY_CHOICES = ("existing", "new", "local", "never")
+SHARED_MEMORY_REPO = "claude-memory"
+SHARED_MEMORY_STATE = "claude-protocol.json"
+SHARED_MEMORY_HINT = ("Shared memory is not set up. To set it up without a question: "
+                      "--shared-memory new | local | never | existing <url>")
+SHARED_MEMORY_README = {
+    "en": "Shared memory for Claude Code: one file per fact, the index is MEMORY.md.\n",
+    "ru": "Общая память Claude Code: файл на факт, индекс — MEMORY.md.\n",
+}
+
+_SHARED_BEGIN_RE = re.compile(r"<!--\s*claude-protocol:shared-memory:begin\b.*?-->",
+                              re.DOTALL)
+_SHARED_END_RE = re.compile(r"<!--\s*claude-protocol:shared-memory:end\s*-->")
+
+_GIT_TIMEOUT = 300
+
+
+def parse_shared_memory_flag(values) -> tuple:
+    """--shared-memory as (choice, url). Raises ValueError with what is wrong."""
+    if not values:
+        raise ValueError("expected one of: " + ", ".join(SHARED_MEMORY_CHOICES))
+    choice, rest = values[0], list(values[1:])
+    if choice not in SHARED_MEMORY_CHOICES:
+        raise ValueError(f"unknown choice {choice!r}; expected one of: "
+                         + ", ".join(SHARED_MEMORY_CHOICES))
+    if choice == "existing":
+        if len(rest) != 1:
+            raise ValueError("existing takes exactly one repository url")
+        return choice, rest[0]
+    if rest:
+        raise ValueError(f"{choice} takes no further value")
+    return choice, None
+
+
+def shared_memory_dir() -> Path:
+    return _claude_config_dir() / "shared-memory"
+
+
+def _shared_state_path() -> Path:
+    return _claude_config_dir() / SHARED_MEMORY_STATE
+
+
+def load_shared_memory_state() -> dict:
+    """What this machine answered before, or {} when it never did."""
+    try:
+        data = json.loads(_shared_state_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    state = data.get("shared_memory") if isinstance(data, dict) else None
+    return state if isinstance(state, dict) else {}
+
+
+def _save_shared_memory_state(state: dict) -> None:
+    """Keep whatever else the file holds; only our key is replaced."""
+    path = _shared_state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data["shared_memory"] = state
+    write_verbatim(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+def _run_tool(cmd: list) -> tuple:
+    """(ok, stdout or the reason it failed). gh and git talk to the network."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=_GIT_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "").strip()
+    return True, (result.stdout or "").strip()
+
+
+def _missing_tools(*names) -> str | None:
+    missing = [n for n in names if not shutil.which(n)]
+    return f"{', '.join(missing)} not found" if missing else None
+
+
+def _occupied(dest: Path) -> str | None:
+    """Why a clone cannot go to dest, or None when it can."""
+    if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+        return f"{dest} already exists and is not empty"
+    return None
+
+
+def _seed_memory_files(dest: Path, lang: str) -> list:
+    """An empty index and a one-line README, where they are missing."""
+    made = []
+    for name, text in (("MEMORY.md", ""), ("README.md", SHARED_MEMORY_README[lang])):
+        if not (dest / name).exists():
+            write_verbatim(dest / name, text)
+            made.append(name)
+    return made
+
+
+def _create_shared_repo(dest: Path, lang: str) -> tuple:
+    """gh repo create <login>/claude-memory --private, cloned into dest.
+    Returns (remote, None) or (None, why it failed)."""
+    why = _missing_tools("gh", "git") or _occupied(dest)
+    if why:
+        return None, why
+    ok, login = _run_tool(["gh", "api", "user", "--jq", ".login"])
+    if not ok or not login:
+        return None, f"gh is not signed in ({login or 'no login'}); run: gh auth login"
+    remote = f"{login}/{SHARED_MEMORY_REPO}"
+    for cmd in (["gh", "repo", "create", remote, "--private"],
+                ["gh", "repo", "clone", remote, str(dest)]):
+        ok, out = _run_tool(cmd)
+        if not ok:
+            return None, f"{' '.join(cmd[:3])} failed: {out}"
+    _seed_memory_files(dest, lang)
+    _push_seed_files(dest)
+    return remote, None
+
+
+def _push_seed_files(dest: Path) -> None:
+    """Commit and push the seed files. The repository and the clone exist by
+    now, so a failure here (no git user, network) leaves the setup in place
+    with a warning — failing would leave a folder no retry can clone into."""
+    git = ["git", "-C", str(dest)]
+    for cmd in (git + ["add", "-A"],
+                git + ["commit", "-m", "Shared memory for Claude Code"],
+                git + ["push", "-u", "origin", "HEAD"]):
+        ok, out = _run_tool(cmd)
+        if not ok:
+            print(f"  WARNING: git {cmd[3]} failed: {out}")
+            print(f"  Shared memory is set up in {dest}, not pushed yet. To finish:"
+                  " set git user.name and user.email if they are missing, then in"
+                  " that folder: git add -A, git commit, git push -u origin HEAD")
+            return
+
+
+def _clone_shared_repo(url: str, dest: Path, lang: str) -> tuple:
+    """git clone url dest. Returns (url, None) or (None, why it failed)."""
+    why = _missing_tools("git") or _occupied(dest)
+    if why:
+        return None, why
+    ok, out = _run_tool(["git", "clone", url, str(dest)])
+    if not ok:
+        return None, f"git clone failed: {out}"
+    made = _seed_memory_files(dest, lang)
+    if made:
+        print(f"  - created {', '.join(made)} in the clone — not committed yet")
+    return url, None
+
+
+def _make_local_folder(dest: Path, lang: str) -> tuple:
+    if dest.exists() and not dest.is_dir():
+        return None, f"{dest} is a file"
+    dest.mkdir(parents=True, exist_ok=True)
+    _seed_memory_files(dest, lang)
+    return None, None
+
+
+def _memory_reference(dest: Path) -> str:
+    """How CLAUDE.md names the folder: ~/ when it is under home, so the same
+    line works on another machine; the absolute path otherwise."""
+    try:
+        return "~/" + dest.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return dest.as_posix()
+
+
+def shared_memory_block(lang: str, dest: Path) -> str:
+    """Our marked block for the user's CLAUDE.md, markers included."""
+    name = "CLAUDE-block-ru.md" if lang == "ru" else "CLAUDE-block.md"
+    text = _lf(read_verbatim(TEMPLATES_DIR / "shared-memory" / name)).strip("\n")
+    return text.replace("{{SHARED_MEMORY}}", _memory_reference(dest))
+
+
+def _user_claude_md_text(current: str, block: str) -> str | None:
+    """The user's CLAUDE.md with our block in it, or None when a begin marker
+    has no end — replacing then could swallow the rest of their file."""
+    span = marked_span(current, _SHARED_BEGIN_RE, _SHARED_END_RE)
+    if span:
+        return splice(current, span, block)
+    if _SHARED_BEGIN_RE.search(current):
+        return None
+    if not current.strip():
+        return block + "\n"
+    return current.rstrip("\r\n") + _in_style_of(current, "\n\n" + block + "\n")
+
+
+def update_user_claude_md(block: str, dry_run: bool) -> bool:
+    """Put our block into <config>/CLAUDE.md. Backs the file up before any
+    change; never touches a line outside our markers. False on refusal."""
+    dest = _claude_config_dir() / "CLAUDE.md"
+    if dest.exists() and not dest.is_file():
+        print(f"  ERROR: {dest} is not a file — left alone")
+        return False
+    current = read_verbatim(dest) if dest.exists() else ""
+    text = _user_claude_md_text(current, block)
+    if text is None:
+        print(f"  ERROR: {dest} has our begin marker without the end one — "
+              "left alone. Fix or remove the marker and run again.")
+        return False
+    if text == current:
+        print(f"  - {dest} (up to date)")
+        return True
+    if not dry_run:
+        if current:
+            backup = (_claude_config_dir() / "claude-protocol-backups"
+                      / _upgrade_timestamp() / "CLAUDE.md")
+            write_verbatim(backup, current)
+            print(f"  - backup: {backup}")
+        write_verbatim(dest, text)
+    print(f"  - {_dry(dry_run)}{dest} (shared memory block "
+          f"{'refreshed' if current else 'written'})")
+    return True
+
+
+def _ask_shared_memory() -> tuple | None:
+    """The question, for a person at a terminal. (choice, url) or None."""
+    print("\nShared memory: one place, for every project on this machine, for what")
+    print("helps in more than one of them — your preferences, shared infrastructure,")
+    print("lessons about tools. Asked once per machine.")
+    print("  1. Connect an existing repository (git clone)")
+    print(f"  2. Create a new private repository <your login>/{SHARED_MEMORY_REPO} (gh)")
+    print("  3. A local folder only, no git")
+    print("  4. Not now — and do not ask again")
+    try:
+        answer = input("  Choose 1-4 (Enter: ask next time): ").strip()
+        if answer == "1":
+            url = input("  Repository url: ").strip()
+            return ("existing", url) if url else None
+    except (EOFError, OSError):
+        return None
+    return {"2": ("new", None), "3": ("local", None), "4": ("never", None)}.get(answer)
+
+
+def _apply_shared_memory(choice: str, url, lang: str, dry_run: bool) -> int:
+    """Carry out one answer: make the folder, remember it, write the block."""
+    dest = shared_memory_dir()
+    if choice == "never":
+        print(f"  - {_dry(dry_run)}remembered: not now (shared memory is not asked again)")
+        if not dry_run:
+            _save_shared_memory_state({"choice": "never"})
+        return 0
+    if dry_run:
+        what = {"new": f"create a private {SHARED_MEMORY_REPO} repository and clone it",
+                "existing": f"clone {url}", "local": "make a local folder"}[choice]
+        print(f"  - [DRY-RUN] would {what} — {dest}")
+        return 0 if update_user_claude_md(shared_memory_block(lang, dest), True) else 1
+    make = {"new": lambda: _create_shared_repo(dest, lang),
+            "existing": lambda: _clone_shared_repo(url, dest, lang),
+            "local": lambda: _make_local_folder(dest, lang)}[choice]
+    remote, why = make()
+    if why:
+        print(f"  ERROR: shared memory not set up — {why}")
+        print(f"  {SHARED_MEMORY_HINT}")
+        return 1
+    print(f"  - shared memory: {dest}" + (f" ({remote})" if remote else ""))
+    _save_shared_memory_state({"choice": choice, "path": str(dest),
+                               "remote": remote, "lang": lang})
+    return 0 if update_user_claude_md(shared_memory_block(lang, dest), False) else 1
+
+
+def _refresh_shared_memory(state: dict, lang: str, dry_run: bool) -> int:
+    """Already set up: bring our block up to date, remember a new language."""
+    if state.get("lang") != lang and not dry_run:
+        _save_shared_memory_state({**state, "lang": lang})
+    block = shared_memory_block(lang, Path(state["path"]))
+    return 0 if update_user_claude_md(block, dry_run) else 1
+
+
+def setup_shared_memory(flag, *, lang=None, default_lang=None,
+                        interactive: bool, dry_run: bool) -> int:
+    """The shared-memory step of init and upgrade. 0, or 1 when it failed.
+
+    `flag` is the parsed --shared-memory, the same answer without the question.
+    Nobody to ask, no flag, never answered: one line saying how, nothing else.
+    """
+    print("\n[shared memory]")
+    state = load_shared_memory_state()
+    lang = lang or state.get("lang") or default_lang or "en"
+    configured = state.get("choice") in ("existing", "new", "local") and state.get("path")
+    if configured:
+        if flag:
+            print(f"  - already set up at {state['path']}; --shared-memory ignored")
+        return _refresh_shared_memory(state, lang, dry_run)
+    if flag:
+        return _apply_shared_memory(flag[0], flag[1], lang, dry_run)
+    if state.get("choice") == "never":
+        print("  - not set up (you chose not now)")
+        return 0
+    answer = _ask_shared_memory() if interactive and not dry_run else None
+    if answer is None:
+        print(f"  {SHARED_MEMORY_HINT}")
+        return 0
+    return _apply_shared_memory(answer[0], answer[1], lang, dry_run)
+
+
 def main():
     import argparse
 
@@ -2246,23 +2555,40 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print plan without writing anything")
     parser.add_argument("--install-beads", dest="install_bd", action="store_true", help="Install the beads CLI without asking (default: ask, and install nothing when nobody can answer)")
     parser.add_argument("--project-only", dest="project_only", action="store_true", help="Install only what a plugin cannot carry: beads, rules, CLAUDE.md. Hooks, agents and skills come from the plugin, and copies of them already in the project are removed")
+    parser.add_argument("--shared-memory", dest="shared_memory", nargs="+", default=None, metavar="CHOICE", help="Shared memory for every project on this machine, the same answer as the question, without it: existing <url> | new | local | never. new creates a private <login>/claude-memory with gh; the folder is <config>/shared-memory")
     parser.add_argument("--all", dest="all_parent", default=None, metavar="PARENT_DIR", help="Batch upgrade: iterate direct subdirs of PARENT_DIR that contain .beads/. Implies --upgrade.")
     args = parser.parse_args()
+    try:
+        shared_flag = (parse_shared_memory_flag(args.shared_memory)
+                       if args.shared_memory else None)
+    except ValueError as e:
+        parser.error(f"--shared-memory: {e}")
 
     if args.all_parent:
         parent = Path(args.all_parent).resolve()
-        sys.exit(run_batch_upgrade(
+        rc = run_batch_upgrade(
             parent_dir=parent, with_rules=args.with_rules, lang=args.lang,
             force=args.force, dry_run=args.dry_run,
-        ))
+        )
+        # A batch has nobody to answer, even on a terminal: the flag or a hint.
+        if rc == 0:
+            rc = setup_shared_memory(shared_flag, lang=args.lang,
+                                     interactive=False, dry_run=args.dry_run)
+        sys.exit(rc)
 
     project_dir = Path(args.project_dir).resolve()
-    sys.exit(bootstrap_project(
+    rc = bootstrap_project(
         project_dir=project_dir, project_name=args.project_name,
         with_rules=args.with_rules, lang=args.lang, force=args.force,
         upgrade=args.upgrade, dry_run=args.dry_run, keep_mine=args.keep_mine,
         install_bd=args.install_bd, project_only=args.project_only,
-    ))
+    )
+    if rc == 0:
+        rc = setup_shared_memory(
+            shared_flag, lang=args.lang,
+            default_lang=load_manifest(project_dir).get("lang"),
+            interactive=_stdin_is_a_person(), dry_run=args.dry_run)
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

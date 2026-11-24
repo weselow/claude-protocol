@@ -32,6 +32,11 @@ Options:
   --install-beads  Install the beads CLI (bd) without asking. By default you
                    are asked first, and a run nobody can answer installs
                    nothing and prints the command instead.
+  --shared-memory <existing <url>|new|local|never>
+                   Shared memory for every project on this machine,
+                   answered without the question (plugin installs and
+                   other runs nobody can answer). new creates a private
+                   <login>/claude-memory with gh.
   --all <parent>   Batch upgrade: iterate subdirs of <parent> with .beads/ (upgrade only)
 
 Examples:
@@ -42,6 +47,7 @@ Examples:
   claude-protocol upgrade
   claude-protocol upgrade --dry-run
   claude-protocol upgrade --all /path/to/parent-dir
+  claude-protocol init --shared-memory new
 `);
 }
 
