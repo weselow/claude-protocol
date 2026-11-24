@@ -2440,7 +2440,9 @@ def _imported_bd_keys(new: Path) -> tuple:
     """
     listed = new / BD_IMPORTED
     if listed.is_file():
-        keys = {k.strip() for k in read_verbatim(listed).splitlines()}
+        # An editor may add a BOM or spaces; keys are compared stripped.
+        keys = {k.strip().lstrip("\ufeff").strip()
+                for k in read_verbatim(listed).splitlines()}
         return keys - {""}, True
     if not new.is_dir():
         return set(), False
@@ -2450,7 +2452,8 @@ def _imported_bd_keys(new: Path) -> tuple:
 
 def _write_imported_bd_keys(new: Path, keys: set) -> None:
     write_verbatim(new / BD_IMPORTED, "".join(
-        f"{k}\n" for k in sorted(keys) if "\n" not in k and "\r" not in k))
+        f"{k}\n" for k in sorted({k.strip() for k in keys})
+        if k.strip() and "\n" not in k and "\r" not in k))
 
 
 def import_bd_memory(project_dir: Path, dry_run: bool,
@@ -2471,7 +2474,7 @@ def import_bd_memory(project_dir: Path, dry_run: bool,
     known = set(imported)
     taken, lines, skipped = set(), [], 0
     for key, text in sorted(memories.items()):
-        if key in imported:
+        if key.strip() in imported:
             skipped += 1
             continue
         path, already = _bd_entry_path(new, key, taken)

@@ -4926,6 +4926,25 @@ class TestBdImportedKeys:
             line for line in read_verbatim(index).splitlines(keepends=True)
             if f"]({name})" not in line))
 
+    @pytest.mark.parametrize("keys, bom", [
+        ({"a": "x", "b": "y"}, True),
+        ({"a": "x", " c ": "z"}, False),
+    ], ids=["bom-in-list", "key-with-spaces"])
+    def test_an_edited_list_still_keeps_sorted_facts_out(
+            self, tmp_path, monkeypatch, keys, bom):
+        _bd_says(monkeypatch, keys)
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        listed = tmp_path / ".memory" / ".bd-imported"
+        if bom:
+            listed.write_bytes(b"\xef\xbb\xbf" + listed.read_bytes())
+        for name in _memory_files(tmp_path):
+            if name != "MEMORY.md":
+                self._forget(tmp_path, name)
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _memory_files(tmp_path) == ["MEMORY.md"]
+
     def test_the_import_lists_the_keys_it_brought(self, tmp_path, monkeypatch):
         _bd_says(monkeypatch, {"b": "y", "a": "x"})
 

@@ -39,7 +39,8 @@ Read a shared fact file only when a project fact looks like one of them.
 Take the project's fact files in index order, about 30 per batch. For each
 batch: read its files, sort them (below), ask (step 3), move what is
 confirmed (step 4), then go on to the next batch. Say how many batches are
-left. A memory of under 30 files is one batch.
+left. A memory of under 30 files is one batch. Fact files that no index
+line points to go in the last batch.
 
 Apply the route test from the "Memory: where to write" block in
 `~/.claude/CLAUDE.md` - the same test, not a new one:
@@ -115,4 +116,5 @@ came in, and `git push` when it has an upstream. A failed push - say so and
 leave the commit; do not retry in a loop. The project's `.memory/` is
 committed only when the project already tracks it; ask before committing.
 
-Report: moved N, merged N, dropped N, secrets left in place N, stays N.
+Report: moved N, merged N, dropped N, rules proposed N, secrets left in
+place N, stays N.
