@@ -961,6 +961,20 @@ describe('session-start in a worktree that keeps its auto memory elsewhere', SLO
     expect(memoryLines(run(repo.worktree).stdout)).toEqual([]);
   });
 
+  it('takes a setting written from the home folder, ~/…', () => {
+    const repo = repoWithMemory();
+    fs.mkdirSync(path.join(repo.worktree, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(repo.worktree, '.claude', 'settings.local.json'),
+      JSON.stringify({ autoMemoryDirectory: `~/${path.basename(repo.dir)}/.memory` }));
+    // The folder holding the repository stands in for the home folder.
+    const home = path.dirname(repo.dir);
+
+    const result = runHook(repo.worktree, { ...fakeTools().env, HOME: home, USERPROFILE: home });
+
+    expect(result.status).toBe(0);
+    expect(memoryLines(result.stdout)).toEqual([]);
+  });
+
   it('keeps quiet when the main checkout has no .memory', () => {
     expect(memoryLines(run(repoWithMemory(null).worktree).stdout)).toEqual([]);
   });

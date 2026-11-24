@@ -17,7 +17,7 @@ const {
   parseBdVersion, versionBelow, BD_MIN_VERSION,
   hasBeads, isPluginInstall, readOwnVersion, updateNotice,
   leftoverProjectHooks, execCommandAsync, sharedMemoryDir, quietGitEnv,
-  nonEmptyIndex, samePath,
+  nonEmptyIndex, samePath, parseGitDirs, expandHome,
 } = require('./hook-utils.cjs');
 
 // Up here, not with the functions using them: the hook body below starts
@@ -56,13 +56,14 @@ runHook('session-start', async () => {
   // Started first and in every project, beads or not: shared memory serves
   // them all, and the pull talks to the network while the rest runs.
   const memoryPull = pullSharedMemory();
+  const projectDir = getProjectDir();
+  // Asked while the pull runs, not after it.
+  const output = worktreeMemoryLines(projectDir);
   if (!hasBeads()) {
     reportNoBeads();
-    return injectLines([...await memoryPull, ...worktreeMemoryLines(getProjectDir())]);
+    return injectLines([...await memoryPull, ...output]);
   }
 
-  const projectDir = getProjectDir();
-  const output = worktreeMemoryLines(projectDir);
   const repoRoot = execCommand('git', ['-C', projectDir, 'rev-parse', '--show-toplevel']);
 
   collectDoubleInstall(projectDir, output);
@@ -132,10 +133,11 @@ function pullSharedMemory() {
 function worktreeMemoryLines(projectDir) {
   try {
     const answer = execCommand('git', [
-      '-C', projectDir, 'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir',
+      '-C', projectDir, 'rev-parse', '--git-dir', '--git-common-dir',
     ], { cwd: projectDir });
-    const [gitDir, commonDir] = (answer || '').split(/\r?\n/);
-    if (!gitDir || !commonDir || samePath(gitDir, commonDir)) return [];
+    const dirs = parseGitDirs(answer, projectDir);
+    if (!dirs || samePath(dirs.gitDir, dirs.commonDir)) return [];
+    const { commonDir } = dirs;
     if (path.basename(commonDir) !== '.git') return [];
     const memoryDir = path.join(path.dirname(commonDir), '.memory');
     const index = nonEmptyIndex(path.join(memoryDir, 'MEMORY.md'));
@@ -156,7 +158,7 @@ function autoMemoryDirectory(dir, memoryDir) {
     const text = fs.readFileSync(path.join(dir, '.claude', 'settings.local.json'), 'utf8');
     // bootstrap keeps a BOM it found; JSON.parse does not take one.
     const data = JSON.parse(text.replace(/^\uFEFF/, ''));
-    return Boolean(data) && samePath(data.autoMemoryDirectory, memoryDir);
+    return Boolean(data) && samePath(expandHome(data.autoMemoryDirectory), memoryDir);
   } catch {
     return false;
   }
