@@ -974,6 +974,30 @@ function mainCheckoutRoot(dir) {
 }
 
 /**
+ * The answer of `git rev-parse --git-dir --git-common-dir`, both resolved
+ * against `dir` — the folder git was asked in. --path-format=absolute would
+ * spare that, but git before 2.31 does not know it, prints it back and exits
+ * 0. So anything but two non-empty lines, none of them an option, is null.
+ */
+function parseGitDirs(answer, dir) {
+  const lines = String(answer || '').split(/\r?\n/).map(line => line.trim());
+  if (lines.length !== 2 || lines.some(line => !line || line.startsWith('-'))) return null;
+  const [gitDir, commonDir] = lines.map(line => path.resolve(dir, line));
+  return { gitDir, commonDir };
+}
+
+/**
+ * A setting's `~/…` or `~\…` with the home folder put in. Claude Code takes
+ * autoMemoryDirectory either absolute or starting with ~/. Anything else is
+ * returned as it came.
+ */
+function expandHome(value) {
+  if (typeof value !== 'string') return value;
+  if (value === '~') return os.homedir();
+  return /^~[\\/]/.test(value) ? path.join(os.homedir(), value.slice(2)) : value;
+}
+
+/**
  * The index when it holds something. bootstrap creates the shared MEMORY.md
  * empty, and a pointer to an empty file sends an agent to read nothing.
  */
@@ -1036,6 +1060,7 @@ module.exports = {
   getCurrentBranch,
   getProjectDir,
   isPluginInstall,
+  samePath,
   pluginActiveHere,
   leftoverProjectHooks,
   hasBeads,
@@ -1051,6 +1076,9 @@ module.exports = {
   claudeConfigDir,
   sharedMemoryDir,
   mainCheckoutRoot,
+  parseGitDirs,
+  expandHome,
+  nonEmptyIndex,
   projectMemoryIndex,
   sharedMemoryIndex,
   quietGitEnv,

@@ -906,3 +906,80 @@ describe('session-start updating the shared memory', SLOW, () => {
     expect(fs.readFileSync(path.join(memory.shared, 'MEMORY.md'), 'utf8')).toContain('third');
   });
 });
+
+describe('session-start in a worktree that keeps its auto memory elsewhere', SLOW, () => {
+  /** A repository with a worktree, and `memory` as the main checkout's index. */
+  function repoWithMemory(memory = '- a lesson\n') {
+    const repo = repoWithWorktree({ work: 'fresh' });
+    if (memory !== null) {
+      fs.mkdirSync(path.join(repo.dir, '.memory'));
+      fs.writeFileSync(path.join(repo.dir, '.memory', 'MEMORY.md'), memory);
+    }
+    return repo;
+  }
+  const memoryLines = (stdout) => stdout.split('\n').filter(line => line.startsWith('Project memory'));
+  const run = (dir) => runHook(dir, fakeTools().env);
+
+  it('says once where the project memory is, from a worktree without the setting', () => {
+    const repo = repoWithMemory();
+
+    const result = run(repo.worktree);
+
+    expect(result.status).toBe(0);
+    const lines = memoryLines(result.stdout);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('MEMORY.md');
+    expect(lines[0]).toContain('main checkout');
+    expect(fs.existsSync(path.join(repo.worktree, '.claude', 'settings.local.json'))).toBe(false);
+  });
+
+  it('says it in a worktree with beads too, ahead of the rest', () => {
+    const repo = repoWithMemory();
+    // bd worktree create leaves a .beads redirect in the worktree.
+    fs.mkdirSync(path.join(repo.worktree, '.beads'));
+
+    const result = run(repo.worktree);
+
+    expect(result.status).toBe(0);
+    expect(memoryLines(result.stdout)).toHaveLength(1);
+    expect(result.stdout.split('\n')[0]).toMatch(/^Project memory/);
+  });
+
+  it('keeps quiet in the main checkout', () => {
+    const repo = repoWithMemory();
+
+    expect(memoryLines(run(repo.dir).stdout)).toEqual([]);
+  });
+
+  it('keeps quiet in a worktree whose settings point at the main checkout\'s .memory', () => {
+    const repo = repoWithMemory();
+    fs.mkdirSync(path.join(repo.worktree, '.claude'), { recursive: true });
+    // With a BOM, as an editor on Windows may leave it.
+    fs.writeFileSync(path.join(repo.worktree, '.claude', 'settings.local.json'),
+      '﻿' + JSON.stringify({ autoMemoryDirectory: path.join(repo.dir, '.memory') }));
+
+    expect(memoryLines(run(repo.worktree).stdout)).toEqual([]);
+  });
+
+  it('takes a setting written from the home folder, ~/…', () => {
+    const repo = repoWithMemory();
+    fs.mkdirSync(path.join(repo.worktree, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(repo.worktree, '.claude', 'settings.local.json'),
+      JSON.stringify({ autoMemoryDirectory: `~/${path.basename(repo.dir)}/.memory` }));
+    // The folder holding the repository stands in for the home folder.
+    const home = path.dirname(repo.dir);
+
+    const result = runHook(repo.worktree, { ...fakeTools().env, HOME: home, USERPROFILE: home });
+
+    expect(result.status).toBe(0);
+    expect(memoryLines(result.stdout)).toEqual([]);
+  });
+
+  it('keeps quiet when the main checkout has no .memory', () => {
+    expect(memoryLines(run(repoWithMemory(null).worktree).stdout)).toEqual([]);
+  });
+
+  it('keeps quiet when the index is empty', () => {
+    expect(memoryLines(run(repoWithMemory('  \n').worktree).stdout)).toEqual([]);
+  });
+});

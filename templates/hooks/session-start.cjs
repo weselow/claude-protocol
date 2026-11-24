@@ -17,6 +17,7 @@ const {
   parseBdVersion, versionBelow, BD_MIN_VERSION,
   hasBeads, isPluginInstall, readOwnVersion, updateNotice,
   leftoverProjectHooks, execCommandAsync, sharedMemoryDir, quietGitEnv,
+  nonEmptyIndex, samePath, parseGitDirs, expandHome,
 } = require('./hook-utils.cjs');
 
 // Up here, not with the functions using them: the hook body below starts
@@ -55,13 +56,14 @@ runHook('session-start', async () => {
   // Started first and in every project, beads or not: shared memory serves
   // them all, and the pull talks to the network while the rest runs.
   const memoryPull = pullSharedMemory();
+  const projectDir = getProjectDir();
+  // Asked while the pull runs, not after it.
+  const output = worktreeMemoryLines(projectDir);
   if (!hasBeads()) {
     reportNoBeads();
-    return injectLines(await memoryPull);
+    return injectLines([...await memoryPull, ...output]);
   }
 
-  const projectDir = getProjectDir();
-  const output = [];
   const repoRoot = execCommand('git', ['-C', projectDir, 'rev-parse', '--show-toplevel']);
 
   collectDoubleInstall(projectDir, output);
@@ -111,6 +113,55 @@ function pullSharedMemory() {
   return execCommandAsync('git', ['-C', dir, 'pull', '--ff-only', '--quiet'], {
     cwd: dir, timeout: PULL_TIMEOUT, env,
   }).then(out => (out !== null ? [] : pullWarning(dir)));
+}
+
+/**
+ * One line when this session runs in a linked worktree that does not keep its
+ * auto memory in the main checkout's .memory.
+ *
+ * bootstrap sets autoMemoryDirectory in the main checkout's
+ * settings.local.json only. A session opened straight in .worktrees/bd-*
+ * therefore writes its auto memory somewhere else, and nothing says so. The
+ * setting is not written here on purpose: Claude Code asks about it in the
+ * trust dialog, and a hook writing it silently would go around that question.
+ * Agents are not concerned — memory-pointer gives them the path.
+ *
+ * Silent in the main checkout, when the worktree's own settings.local.json
+ * already points there, when the main checkout has no memory to speak of, and
+ * on any failure. One git call.
+ */
+function worktreeMemoryLines(projectDir) {
+  try {
+    const answer = execCommand('git', [
+      '-C', projectDir, 'rev-parse', '--git-dir', '--git-common-dir',
+    ], { cwd: projectDir });
+    const dirs = parseGitDirs(answer, projectDir);
+    if (!dirs || samePath(dirs.gitDir, dirs.commonDir)) return [];
+    const { commonDir } = dirs;
+    if (path.basename(commonDir) !== '.git') return [];
+    const memoryDir = path.join(path.dirname(commonDir), '.memory');
+    const index = nonEmptyIndex(path.join(memoryDir, 'MEMORY.md'));
+    if (!index || autoMemoryDirectory(projectDir, memoryDir)) return [];
+    return [
+      `Project memory — ${index}. This session runs in a worktree and keeps its auto memory elsewhere: `
+        + `write lessons into ${memoryDir} by hand, or open the session in the main checkout.`,
+      '',
+    ];
+  } catch {
+    return [];
+  }
+}
+
+/** True when <dir>/.claude/settings.local.json points autoMemoryDirectory at `memoryDir`. */
+function autoMemoryDirectory(dir, memoryDir) {
+  try {
+    const text = fs.readFileSync(path.join(dir, '.claude', 'settings.local.json'), 'utf8');
+    // bootstrap keeps a BOM it found; JSON.parse does not take one.
+    const data = JSON.parse(text.replace(/^\uFEFF/, ''));
+    return Boolean(data) && samePath(expandHome(data.autoMemoryDirectory), memoryDir);
+  } catch {
+    return false;
+  }
 }
 
 function pullWarning(dir) {

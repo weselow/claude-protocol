@@ -1421,3 +1421,51 @@ describe('quietGitEnv', () => {
     expect(given).toEqual({});
   });
 });
+
+const { parseGitDirs, expandHome } = require(utilsPath);
+
+describe('parseGitDirs', () => {
+  const dir = path.resolve(os.tmpdir(), 'some-project');
+
+  it('resolves both answers against the folder git was asked in', () => {
+    expect(parseGitDirs('.git\n.git', dir)).toEqual({
+      gitDir: path.join(dir, '.git'), commonDir: path.join(dir, '.git'),
+    });
+  });
+
+  it('keeps absolute answers as they are', () => {
+    const main = path.resolve(os.tmpdir(), 'main', '.git');
+    const linked = path.join(main, 'worktrees', 'bd-x');
+    expect(parseGitDirs(`${linked}\r\n${main}`, dir)).toEqual({ gitDir: linked, commonDir: main });
+  });
+
+  // git before 2.31 does not know --path-format: it prints the option back
+  // and still exits 0.
+  it('gives nothing for an answer with an option echoed back', () => {
+    expect(parseGitDirs('--path-format=absolute\n.git\n.git', dir)).toBeNull();
+    expect(parseGitDirs('--git-common-dir\n.git', dir)).toBeNull();
+  });
+
+  it('gives nothing for anything but two non-empty lines', () => {
+    for (const answer of [null, '', '.git', '.git\n', '\n.git', '.git\n.git\n.git']) {
+      expect(parseGitDirs(answer, dir)).toBeNull();
+    }
+  });
+});
+
+describe('expandHome', () => {
+  it('puts the home folder in place of a leading ~/ or ~\\', () => {
+    expect(expandHome('~/notes/.memory')).toBe(path.join(os.homedir(), 'notes/.memory'));
+    expect(expandHome('~\\notes')).toBe(path.join(os.homedir(), 'notes'));
+    expect(expandHome('~')).toBe(os.homedir());
+  });
+
+  it('leaves every other value alone', () => {
+    const absolute = path.resolve(os.tmpdir(), 'x');
+    expect(expandHome(absolute)).toBe(absolute);
+    expect(expandHome('~other/x')).toBe('~other/x');
+    expect(expandHome('a/~/b')).toBe('a/~/b');
+    expect(expandHome(undefined)).toBeUndefined();
+    expect(expandHome(42)).toBe(42);
+  });
+});
