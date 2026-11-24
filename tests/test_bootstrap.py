@@ -4216,22 +4216,65 @@ class TestMemoryInGitignore:
 
 
 class TestRepoVisibility:
-    def _with(self, monkeypatch, result=None, error=None):
-        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "gh")
+    """Asks gh about origin by name: with several remotes and no gh default,
+    a bare `gh repo view` picks upstream, and a private upstream would let
+    .memory be committed to a public origin."""
+
+    def _with(self, monkeypatch, origin=(0, "https://github.com/me/proj.git\n"),
+              result=(0, "PUBLIC\n"), error=None):
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: name)
+        calls = []
 
         def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:2] == ["git", "remote"]:
+                assert cmd == ["git", "remote", "get-url", "origin"]
+                if isinstance(origin, Exception):
+                    raise origin
+                return SimpleNamespace(returncode=origin[0], stdout=origin[1], stderr="")
             assert cmd[:3] == ["gh", "repo", "view"]
             if error:
                 raise error
             return SimpleNamespace(returncode=result[0], stdout=result[1], stderr="")
         monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+        return calls
 
     def test_public(self, tmp_path, monkeypatch):
-        self._with(monkeypatch, (0, "PUBLIC\n"))
+        self._with(monkeypatch)
         assert _REAL_REPO_VISIBILITY(tmp_path) == "PUBLIC"
 
+    @pytest.mark.parametrize("url, repo", [
+        ("https://github.com/me/proj.git", "github.com/me/proj"),
+        ("https://github.com/me/proj", "github.com/me/proj"),
+        ("https://token@github.com/me/proj.git", "github.com/me/proj"),
+        ("git@github.com:me/proj.git", "github.com/me/proj"),
+        ("ssh://git@github.com/me/proj.git", "github.com/me/proj"),
+        ("ssh://git@ghe.corp:2222/team/proj", "ghe.corp/team/proj"),
+    ], ids=["https", "https-bare", "https-token", "scp", "ssh", "ssh-port"])
+    def test_asks_about_origin_by_name(self, tmp_path, monkeypatch, url, repo):
+        calls = self._with(monkeypatch, origin=(0, url + "\n"))
+
+        _REAL_REPO_VISIBILITY(tmp_path)
+
+        gh = [c for c in calls if c[0] == "gh"]
+        assert gh and gh[0][3] == repo
+
+    def test_no_origin_is_unknown_and_gh_is_not_asked(self, tmp_path, monkeypatch):
+        calls = self._with(monkeypatch, origin=(2, ""))
+        assert _REAL_REPO_VISIBILITY(tmp_path) is None
+        assert not [c for c in calls if c[0] == "gh"]
+
+    def test_an_origin_that_is_not_a_repo_url_is_unknown(self, tmp_path, monkeypatch):
+        calls = self._with(monkeypatch, origin=(0, "../local/clone\n"))
+        assert _REAL_REPO_VISIBILITY(tmp_path) is None
+        assert not [c for c in calls if c[0] == "gh"]
+
+    def test_git_fails_to_start(self, tmp_path, monkeypatch):
+        self._with(monkeypatch, origin=OSError("no git"))
+        assert _REAL_REPO_VISIBILITY(tmp_path) is None
+
     def test_gh_fails(self, tmp_path, monkeypatch):
-        self._with(monkeypatch, (1, ""))
+        self._with(monkeypatch, result=(1, ""))
         assert _REAL_REPO_VISIBILITY(tmp_path) is None
 
     def test_gh_hangs(self, tmp_path, monkeypatch):
@@ -4240,6 +4283,7 @@ class TestRepoVisibility:
 
     def test_no_gh(self, tmp_path, monkeypatch):
         monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+        monkeypatch.setattr(bootstrap.subprocess, "run", _explode)
         assert _REAL_REPO_VISIBILITY(tmp_path) is None
 
 
@@ -4295,3 +4339,36 @@ class TestProjectMemoryInAFullRun:
         assert bootstrap.run_batch_upgrade(tmp_path, True, "en", False, False) == 0
 
         assert (child / ".memory" / "a.md").exists()
+
+
+class TestProjectMemoryLongPath:
+    """Claude Code cuts a key over 200 characters and adds a hash nobody can
+    rebuild here, so the old folder of such a project cannot be found."""
+
+    def test_old_memory_dir_is_unknown_for_a_long_key(self):
+        assert bootstrap.old_memory_dir(Path("C:/" + "a" * 250)) is None
+
+    def test_old_memory_dir_is_known_at_200(self):
+        assert bootstrap.old_memory_dir(Path("/" + "a" * 199)) is not None
+
+    def test_setting_is_written_and_copying_is_left_to_you(
+            self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(bootstrap, "claude_project_key", lambda pd: "k" * 201)
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert "autoMemoryDirectory" in _local_settings(tmp_path)
+        out = capsys.readouterr().out
+        assert "by hand" in out and ".memory" in out
+
+
+class TestProjectMemorySettingEncoding:
+    def test_a_cyrillic_path_stays_readable(self, tmp_path):
+        project = tmp_path / "\u043f\u0440\u043e\u0435\u043a\u0442"
+        project.mkdir()
+
+        bootstrap.setup_project_memory(project, dry_run=False)
+
+        raw = (project / ".claude" / "settings.local.json").read_bytes()
+        assert "\u043f\u0440\u043e\u0435\u043a\u0442".encode("utf-8") in raw
+        assert b"\\u043f" not in raw

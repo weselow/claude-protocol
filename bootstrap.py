@@ -2001,6 +2001,8 @@ MEMORY_DIR = ".memory"
 MEMORY_INDEX = "MEMORY.md"
 MEMORY_GITIGNORE = "/.memory/"
 _OLD_MEMORY_SUFFIX = ".from-old-memory"
+# Claude Code cuts a longer key to this length and adds a hash of its own.
+_MAX_PROJECT_KEY = 200
 
 
 def claude_project_key(project_dir) -> str:
@@ -2009,6 +2011,10 @@ def claude_project_key(project_dir) -> str:
     Every character that is not an ASCII letter or digit becomes a dash — one
     per UTF-16 unit, the way the JavaScript replace that builds it counts:
     M:\\repos\\a.b -> M--repos-a-b, and each Cyrillic letter is one dash.
+
+    A key over 200 characters is returned whole: Claude Code cuts such a key
+    and appends a hash it does not document, so its folder name cannot be
+    rebuilt here — old_memory_dir gives up on it instead of guessing.
     """
     out = []
     for ch in str(project_dir):
@@ -2019,26 +2025,66 @@ def claude_project_key(project_dir) -> str:
     return "".join(out)
 
 
-def old_memory_dir(project_dir: Path) -> Path:
-    """Where Claude Code kept this project's memory before .memory."""
-    return (_claude_config_dir() / "projects"
-            / claude_project_key(project_dir) / "memory")
+def old_memory_dir(project_dir: Path) -> Path | None:
+    """Where Claude Code kept this project's memory before .memory.
 
-
-def repo_visibility(project_dir: Path) -> str | None:
-    """PUBLIC, PRIVATE or INTERNAL as GitHub says; None when nobody can tell."""
-    if shutil.which("gh") is None:
+    None when the key is over 200 characters: Claude Code shortens it with a
+    hash we cannot reproduce, so that folder cannot be found.
+    """
+    key = claude_project_key(project_dir)
+    if len(key) > _MAX_PROJECT_KEY:
         return None
+    return _claude_config_dir() / "projects" / key / "memory"
+
+
+_REMOTE_URL = re.compile(
+    r"^(?:[a-z+]+://(?:[^@/]+@)?(?P<h1>[^/:]+)(?::\d+)?/"
+    r"|[^@/]+@(?P<h2>[^/:]+):)"
+    r"(?P<path>[^/]+/[^/]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
+)
+
+
+def _repo_from_url(url: str) -> str | None:
+    """HOST/OWNER/REPO from a remote URL, as gh takes it; None if it is not one."""
+    m = _REMOTE_URL.match(url.strip())
+    if not m:
+        return None
+    return f"{m.group('h1') or m.group('h2')}/{m.group('path')}"
+
+
+def _quiet_run(cmd: list, cwd: Path):
+    """Run cmd; the CompletedProcess, or None when it could not run or hung."""
     try:
-        result = subprocess.run(
-            ["gh", "repo", "view", "--json", "visibility", "-q", ".visibility"],
-            cwd=project_dir, capture_output=True, text=True, shell=_SHELL,
+        return subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, shell=_SHELL,
             stdin=subprocess.DEVNULL, timeout=15,
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
+
+
+def repo_visibility(project_dir: Path) -> str | None:
+    """PUBLIC, PRIVATE or INTERNAL as GitHub says; None when nobody can tell.
+
+    gh is asked about origin by name: a bare `gh repo view` in a clone with
+    several remotes and no gh default picks upstream, and a private upstream
+    would let .memory be committed to a public origin. No origin -> None.
+    """
+    if shutil.which("gh") is None:
+        return None
+    origin = _quiet_run(["git", "remote", "get-url", "origin"], project_dir)
+    if origin is None or origin.returncode != 0:
+        return None
+    repo = _repo_from_url(origin.stdout or "")
+    if repo is None:
+        return None
+    result = _quiet_run(["gh", "repo", "view", repo, "--json", "visibility",
+                         "-q", ".visibility"], project_dir)
+    if result is None or result.returncode != 0:
+        return None
     answer = (result.stdout or "").strip().upper()
-    return answer if result.returncode == 0 and answer else None
+    return answer or None
 
 
 def _newline_of(text: str) -> str:
@@ -2073,7 +2119,7 @@ def _set_memory_setting(project_dir: Path, dry_run: bool) -> str:
         return "skip"
     data["autoMemoryDirectory"] = ours
     if not dry_run:
-        write_verbatim(path, json.dumps(data, indent=2) + "\n")
+        write_verbatim(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     print(f"  - {_dry(dry_run)}settings.local.json: autoMemoryDirectory -> {ours}")
     return "set"
 
@@ -2196,7 +2242,10 @@ def setup_project_memory(project_dir: Path, dry_run: bool) -> None:
         return
     state = _set_memory_setting(project_dir, dry_run)
     old = old_memory_dir(project_dir)
-    if state == "set" and old.is_dir():
+    if state == "set" and old is None:
+        print("  - the path is too long to find the old memory folder under "
+              f"{_claude_config_dir() / 'projects'}; copy it into {MEMORY_DIR} by hand")
+    elif state == "set" and old.is_dir():
         try:
             report = migrate_old_memory(old, new, dry_run)
         except (OSError, ValueError) as e:
