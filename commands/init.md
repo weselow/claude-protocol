@@ -1,6 +1,6 @@
 ---
 description: Install the project half of Claude Protocol (beads, rules, CLAUDE.md) and hand the hooks, agents and skills over to this plugin
-argument-hint: "[--lang ru] [--no-rules] [--install-beads]"
+argument-hint: "[--lang ru] [--no-rules] [--install-beads] [--shared-memory new|local|never|existing <url>]"
 ---
 
 Install Claude Protocol into the current project.
@@ -29,6 +29,11 @@ Two things to pass on to the user when it finishes:
 - If `bd` was missing, the bootstrap prints the command to install it and stops
   without installing anything. Re-run with `--install-beads` to allow it, or
   install `bd` first.
+- If the output says **Shared memory is not set up**, nobody could answer the
+  question from inside Claude Code. Ask the user which they want — connect an
+  existing repository (its url), create a new private one with gh, a local
+  folder without git, or not now — and re-run with
+  `--shared-memory existing <url> | new | local | never`.
 
 Do not edit files by hand to work around a failure — report what the bootstrap
 said.
