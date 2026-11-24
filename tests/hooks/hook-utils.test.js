@@ -408,7 +408,8 @@ describe('execCommand argument passing', () => {
 
     const root = execCommand('git', ['-C', repo, 'rev-parse', '--show-toplevel']);
     expect(root).not.toBeNull();
-    expect(fs.realpathSync(root)).toBe(fs.realpathSync(repo));
+    // .native expands 8.3 short names (TEMP=C:\Users\RUNNER~1\...), the JS one does not.
+    expect(fs.realpathSync.native(root)).toBe(fs.realpathSync.native(repo));
   });
 
   // Guards the retry, not the old bug: a failed direct spawn now falls through

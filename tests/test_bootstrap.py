@@ -2383,9 +2383,11 @@ def _template_text(name="Demo"):
 
 
 def _template_region():
+    """The template's block with LF endings, as bootstrap hashes it: a
+    core.autocrlf=true checkout reads the template with CRLF."""
     text = _template_text()
     start, end = marked_span(text)
-    return text[start:end]
+    return bootstrap._lf(text[start:end])
 
 
 def _installed_project(tmp_path, block="## Your Identity\n\nwhat 3.7 shipped\n"):
@@ -5303,7 +5305,7 @@ class TestMemorySortSkill:
         assert f".claude/{MEMORY_SORT_KEY}" in bootstrap.plugin_provided_relpaths()
 
     def test_its_name_matches_its_directory(self):
-        text = read_verbatim(TEMPLATES_DIR / MEMORY_SORT_KEY)
+        text = bootstrap._lf(read_verbatim(TEMPLATES_DIR / MEMORY_SORT_KEY))
         assert text.startswith("---\n")
         front = text.split("---", 2)[1]
         assert re.search(r"^name: memory-sort$", front, re.M)
