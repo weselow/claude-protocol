@@ -29,10 +29,17 @@ main checkout is the parent of `git rev-parse --path-format=absolute
 that folder wins. No `MEMORY.md` there, or an empty one - say there is nothing
 to sort and stop.
 
-Read both `MEMORY.md` indexes, then the project's fact files. Read the shared
-fact files only when a project fact looks like one of them.
+Read both `MEMORY.md` indexes (and an overflow index such as `from-bd.md`)
+now. Do not read the fact files yet: they are read batch by batch in step 2,
+so a memory of hundreds of files never lands in the conversation at once.
+Read a shared fact file only when a project fact looks like one of them.
 
-## 2. Sort
+## 2. Sort, one batch at a time
+
+Take the project's fact files in index order, about 30 per batch. For each
+batch: read its files, sort them (below), ask (step 3), move what is
+confirmed (step 4), then go on to the next batch. Say how many batches are
+left. A memory of under 30 files is one batch.
 
 Apply the route test from the "Memory: where to write" block in
 `~/.claude/CLAUDE.md` - the same test, not a new one:
@@ -48,6 +55,10 @@ Each fact file lands in one of:
 - **secret** - holds a password, token, key, connection string with
   credentials, or a private key block. Listed apart, never moved, whatever
   the user answers. Suggest removing the secret from memory altogether.
+- **rule** - says how to work ("always run X before Y", "never commit Z").
+  A rule about how to work is not memory: do not move it. Propose the change
+  to the rule file it belongs in (`.claude/rules/`, `CLAUDE.md`), and with
+  the user's yes to that change, drop the memory file.
 - **stays** - everything else. Not listed one by one; give the count.
 
 A file whose frontmatter has `metadata.source: bd` was imported from bd's
@@ -64,15 +75,15 @@ Move to shared (12):
  2. user-prefers-ru.md (bd) - the user's language preference
 Already in shared (2):
  3. gh-repo-flag.md = shared/gh-always-repo.md - project copy adds nothing, drop it
+Rules, not memory (1):
+ 4. run-lint-first.md - "run lint before tests"; add to .claude/rules/implementation-standard.md?
 Secrets - not moved (1):
  - seq-api.md - holds an API key; remove it from memory?
-Stays in the project: 40 files.
+Stays in the project: 14 files.
+Batch 1 of 3.
 ```
 
 The user answers with numbers, "all", or edits. Move only what they confirm.
-
-Hundreds of files: work in batches of about 30, by index order. Show one
-batch, move what is confirmed, then the next. Say how many batches are left.
 
 ## 4. Move
 
@@ -81,12 +92,20 @@ For each confirmed file:
 1. Copy it into the shared memory folder. A file of that name already there
    with other content - pick another name, never overwrite.
 2. Add its index line to the shared `MEMORY.md`, in the same form:
-   `- [Title](file.md) - when to open it`.
+   `- [Title](file.md) — when to open it` (an em dash, as in the index
+   lines the installer writes).
 3. Delete the project file and its line in the project `MEMORY.md` (or in the
    overflow index such as `from-bd.md`, when that is where the line is).
 
 For a merge: edit the shared file, then remove the project copy and its line.
 For a drop: remove the project copy and its line only.
+For a rule: edit the rule file the user agreed to, then drop the memory file
+and its line.
+
+A `(bd)` file moved or dropped is still in bd's own memory: bd keeps its copy,
+nothing here calls `bd forget`. It does not come back on the next upgrade -
+the import lists every key it brought in `.memory/.bd-imported` and never
+imports a listed key again. Leave that file alone.
 
 ## 5. Finish
 

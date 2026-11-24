@@ -2250,9 +2250,12 @@ def _ignore_memory_dir(project_dir: Path, dry_run: bool) -> None:
 # bd remember kept a project's lessons in bd's database; .memory takes over.
 # Each entry becomes a file of its own, marked source: bd so the memory review
 # can tell an imported fact from one Claude wrote. bd keeps its copy: bd
-# forget is never called, so the database stays a backup.
+# forget is never called, so the database stays a backup. The keys imported
+# once are listed in .memory/.bd-imported, so a fact sorted out of .memory -
+# moved to shared memory or dropped - is not brought back from bd's copy.
 
 BD_MEMORY_INDEX = "from-bd.md"
+BD_IMPORTED = ".bd-imported"
 # Claude Code loads MEMORY.md only up to here; the rest is never seen.
 _INDEX_MAX_LINES = 200
 _INDEX_MAX_BYTES = 25 * 1024
@@ -2429,22 +2432,50 @@ def _near_top(text: str, line: str) -> str:
     return "".join(lines)
 
 
+def _imported_bd_keys(new: Path) -> tuple:
+    """The keys imported before, and whether .bd-imported already lists them.
+
+    A .memory imported into before the list existed has no list: the bd_key
+    of the files there is the record then.
+    """
+    listed = new / BD_IMPORTED
+    if listed.is_file():
+        keys = {k.strip() for k in read_verbatim(listed).splitlines()}
+        return keys - {""}, True
+    if not new.is_dir():
+        return set(), False
+    keys = {_bd_key_of(p) for p in new.glob("*.md") if p.is_file()}
+    return keys - {None}, False
+
+
+def _write_imported_bd_keys(new: Path, keys: set) -> None:
+    write_verbatim(new / BD_IMPORTED, "".join(
+        f"{k}\n" for k in sorted(keys) if "\n" not in k and "\r" not in k))
+
+
 def import_bd_memory(project_dir: Path, dry_run: bool,
                      index_may_grow: bool = False) -> None:
     """Copy bd's memory of the project into .memory, one file per entry.
 
-    An entry imported before — a file in .memory with its key — is skipped,
-    so the import can run on every upgrade. index_may_grow: a dry run that
-    would first copy the old memory, which it did not, so MEMORY.md may end up
+    A key imported before — listed in .bd-imported, or a file in .memory with
+    its key — is skipped, so the import can run on every upgrade and a fact
+    sorted out of .memory stays out. index_may_grow: a dry run that would
+    first copy the old memory, which it did not, so MEMORY.md may end up
     fuller than the overflow check saw.
     """
     memories = read_bd_memories(project_dir)
     if not memories:
         return
     new = project_dir / MEMORY_DIR
+    imported, listed = _imported_bd_keys(new)
+    known = set(imported)
     taken, lines, skipped = set(), [], 0
     for key, text in sorted(memories.items()):
+        if key in imported:
+            skipped += 1
+            continue
         path, already = _bd_entry_path(new, key, taken)
+        known.add(key)
         if already:
             skipped += 1
             continue
@@ -2452,13 +2483,15 @@ def import_bd_memory(project_dir: Path, dry_run: bool,
         if not dry_run:
             write_verbatim(path, _bd_memory_file(key, text))
         lines.append(_bd_index_line(key, path, text))
+    if not dry_run and (known != imported or not listed):
+        _write_imported_bd_keys(new, known)
     pre = _dry(dry_run)
     if not lines:
-        print(f"  - bd memory: all {skipped} fact(s) are already in {MEMORY_DIR}")
+        print(f"  - bd memory: nothing new, all {skipped} fact(s) were imported before")
         return
     overflow = _write_bd_index(new, lines, dry_run)
     print(f"  - {pre}bd memory: imported {len(lines)} fact(s) into {MEMORY_DIR} "
-          "(bd keeps its copy)" + (f", {skipped} already there" if skipped else ""))
+          "(bd keeps its copy)" + (f", {skipped} imported before" if skipped else ""))
     if overflow:
         print(f"  - {pre}{MEMORY_INDEX} would pass the {_INDEX_MAX_LINES} lines / "
               f"{_INDEX_MAX_BYTES // 1024} KB Claude Code loads: the imported facts "

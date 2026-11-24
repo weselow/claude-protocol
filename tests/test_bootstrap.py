@@ -4793,8 +4793,15 @@ def _bd_says(monkeypatch, memories):
 
 
 def _memory_files(project):
+    """The memory's files, without the list of keys imported before."""
     folder = project / ".memory"
-    return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
+    return sorted(p.name for p in folder.iterdir()
+                  if p.name != bootstrap.BD_IMPORTED) if folder.is_dir() else []
+
+
+def _imported(project):
+    path = project / ".memory" / bootstrap.BD_IMPORTED
+    return read_verbatim(path).splitlines() if path.exists() else None
 
 
 class TestBdMemoryImport:
@@ -4864,7 +4871,7 @@ class TestBdMemoryImportRepeat:
         bootstrap.setup_project_memory(tmp_path, dry_run=False)
 
         assert _snapshot(tmp_path / ".memory") == before
-        assert "already in .memory" in capsys.readouterr().out
+        assert "imported before" in capsys.readouterr().out
 
     def test_only_new_entries_come_in(self, tmp_path, monkeypatch):
         _bd_says(monkeypatch, {"a": "x"})
@@ -4905,6 +4912,88 @@ class TestBdMemoryImportRepeat:
         bootstrap.setup_project_memory(tmp_path, dry_run=False)
 
         assert len(_memory_files(tmp_path)) == 3
+
+
+class TestBdImportedKeys:
+    """.memory/.bd-imported lists every key imported once: a fact sorted out of
+    .memory - moved to shared memory or dropped - never comes back from bd,
+    which keeps its own copy."""
+
+    def _forget(self, project, name):
+        (project / ".memory" / name).unlink()
+        index = project / ".memory" / "MEMORY.md"
+        write_verbatim(index, "".join(
+            line for line in read_verbatim(index).splitlines(keepends=True)
+            if f"]({name})" not in line))
+
+    def test_the_import_lists_the_keys_it_brought(self, tmp_path, monkeypatch):
+        _bd_says(monkeypatch, {"b": "y", "a": "x"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _imported(tmp_path) == ["a", "b"]
+
+    def test_a_sorted_out_fact_does_not_come_back(self, tmp_path, monkeypatch, capsys):
+        _bd_says(monkeypatch, {"a": "x", "b": "y"})
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        self._forget(tmp_path, "a.md")
+        before = _snapshot(tmp_path / ".memory")
+        capsys.readouterr()
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _snapshot(tmp_path / ".memory") == before
+        assert _memory_files(tmp_path) == ["MEMORY.md", "b.md"]
+        assert "imported before" in capsys.readouterr().out
+
+    def test_a_new_key_still_comes_in(self, tmp_path, monkeypatch):
+        _bd_says(monkeypatch, {"a": "x"})
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        self._forget(tmp_path, "a.md")
+        _bd_says(monkeypatch, {"a": "x", "b": "y"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _memory_files(tmp_path) == ["MEMORY.md", "b.md"]
+        assert _imported(tmp_path) == ["a", "b"]
+
+    def test_an_older_memory_without_the_list_gets_one_from_its_files(
+            self, tmp_path, monkeypatch):
+        """Imported before the list existed: bd_key in the files is the record."""
+        folder = tmp_path / ".memory"
+        write_verbatim(folder / "a.md", bootstrap._bd_memory_file("a", "x"))
+        write_verbatim(folder / "mine.md", "Claude wrote this\n")
+        write_verbatim(folder / "MEMORY.md", "- [a](a.md) — x\n")
+        _bd_says(monkeypatch, {"a": "x", "b": "y"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _imported(tmp_path) == ["a", "b"]
+        self._forget(tmp_path, "a.md")
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        assert _memory_files(tmp_path) == ["MEMORY.md", "b.md", "mine.md"]
+
+    def test_nothing_new_still_writes_the_seeded_list(self, tmp_path, monkeypatch):
+        folder = tmp_path / ".memory"
+        write_verbatim(folder / "a.md", bootstrap._bd_memory_file("a", "x"))
+        write_verbatim(folder / "MEMORY.md", "- [a](a.md) — x\n")
+        _bd_says(monkeypatch, {"a": "x"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _imported(tmp_path) == ["a"]
+
+    def test_a_dry_run_writes_no_list(self, tmp_path, monkeypatch):
+        folder = tmp_path / ".memory"
+        write_verbatim(folder / "a.md", bootstrap._bd_memory_file("a", "x"))
+        write_verbatim(folder / "MEMORY.md", "- [a](a.md) — x\n")
+        _bd_says(monkeypatch, {"a": "x", "b": "y"})
+        before = _snapshot(tmp_path)
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=True)
+
+        assert _snapshot(tmp_path) == before
+        assert _imported(tmp_path) is None
 
 
 class TestBdMemoryIndexOverflow:
@@ -5213,5 +5302,5 @@ class TestMemorySortSkill:
         skill = read_verbatim(TEMPLATES_DIR / MEMORY_SORT_KEY)
         assert bootstrap.SHARED_MEMORY_STATE in skill
         assert "shared_memory" in skill
-        for choice in bootstrap.SHARED_MEMORY_CHOICES:
-            assert choice in skill
+        assert set(bootstrap.SHARED_MEMORY_CHOICES) == {"existing", "new", "local", "never"}
+        assert "`choice` is `existing`, `new` or `local`" in skill
