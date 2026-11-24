@@ -4016,7 +4016,9 @@ class _FakeTools:
     def run(self, cmd, **kwargs):
         cmd = [str(c) for c in cmd]
         self.calls.append(cmd)
-        key = " ".join(cmd[:3])
+        # git -C <dir> commit ... fails as "git commit"
+        short = cmd[:1] + cmd[3:] if cmd[:2] == ["git", "-C"] else cmd
+        key = " ".join(short[:3])
         if any(key.startswith(f) for f in self.fail):
             return SimpleNamespace(returncode=1, stdout="", stderr="boom")
         if cmd[:3] == ["gh", "api", "user"]:
@@ -4136,6 +4138,26 @@ class TestSharedMemoryEachChoice:
         assert not (config / "claude-protocol.json").exists()
         assert not (config / "CLAUDE.md").exists()
         assert "--shared-memory" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("step", ["git commit", "git push"])
+    def test_new_that_cannot_commit_or_push_is_set_up_not_pushed(
+            self, config, monkeypatch, capsys, step):
+        """R1: the repository and the clone exist by then — remember them, so a
+        second run does not stop on a folder that is no longer empty."""
+        tools = _FakeTools(monkeypatch, fail={step})
+        assert _setup(("new", None)) == 0
+        dest = config / "shared-memory"
+        state = _state(config)["shared_memory"]
+        assert state["choice"] == "new" and state["path"] == str(dest)
+        assert state["remote"] == "octo/claude-memory"
+        assert "MEMORY.md" in (config / "CLAUDE.md").read_text(encoding="utf-8")
+        out = capsys.readouterr().out
+        assert "WARNING" in out and step.split()[1] in out and str(dest) in out
+        if step == "git commit":
+            assert not tools.ran("git", "-C", str(dest), "push")
+        tools.calls.clear()
+        assert _setup(None) == 0, "a second run stopped on the half-done setup"
+        assert not tools.ran("gh") and not tools.ran("git", "clone")
 
     def test_a_folder_already_there_that_is_not_ours_stops_it(self, config, monkeypatch):
         tools = _FakeTools(monkeypatch)

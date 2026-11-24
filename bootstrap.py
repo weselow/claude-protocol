@@ -2360,14 +2360,25 @@ def _create_shared_repo(dest: Path, lang: str) -> tuple:
         if not ok:
             return None, f"{' '.join(cmd[:3])} failed: {out}"
     _seed_memory_files(dest, lang)
+    _push_seed_files(dest)
+    return remote, None
+
+
+def _push_seed_files(dest: Path) -> None:
+    """Commit and push the seed files. The repository and the clone exist by
+    now, so a failure here (no git user, network) leaves the setup in place
+    with a warning — failing would leave a folder no retry can clone into."""
     git = ["git", "-C", str(dest)]
     for cmd in (git + ["add", "-A"],
                 git + ["commit", "-m", "Shared memory for Claude Code"],
                 git + ["push", "-u", "origin", "HEAD"]):
         ok, out = _run_tool(cmd)
         if not ok:
-            return None, f"{' '.join(cmd[3:5])} failed: {out}"
-    return remote, None
+            print(f"  WARNING: git {cmd[3]} failed: {out}")
+            print(f"  Shared memory is set up in {dest}, not pushed yet. To finish:"
+                  " set git user.name and user.email if they are missing, then in"
+                  " that folder: git add -A, git commit, git push -u origin HEAD")
+            return
 
 
 def _clone_shared_repo(url: str, dest: Path, lang: str) -> tuple:
