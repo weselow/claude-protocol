@@ -3996,6 +3996,394 @@ class TestBothSidesReadTheRegistryTheSameWay:
 
 
 # ============================================================================
+# Project memory moves into <project>/.memory
+# ============================================================================
+# Claude Code keeps a project's memory in ~/.claude/projects/<key>/memory: on
+# one machine only, tied to the path, invisible to agents. bootstrap points
+# autoMemoryDirectory at <project>/.memory, copies the old memory over without
+# overwriting anything, and puts the index into the managed CLAUDE.md block.
+
+_REAL_REPO_VISIBILITY = bootstrap.repo_visibility
+
+
+class TestClaudeProjectKey:
+    """Checked against real folders in ~/.claude/projects: every character
+    that is not an ASCII letter or digit becomes a dash, one each."""
+
+    @pytest.mark.parametrize("path, key", [
+        (r"M:\repos\_claude_tools\The-Claude-Protocol",
+         "M--repos--claude-tools-The-Claude-Protocol"),
+        (r"M:\repos\servers\gpu3060@10.20.0.187",
+         "M--repos-servers-gpu3060-10-20-0-187"),
+        (r"M:\repos\servers\openclaw.jabc.loc",
+         "M--repos-servers-openclaw-jabc-loc"),
+        ("C:\\Users\\\u041c\u0448\u043b\u0448\u0442\u043f01\\proj",
+         "C--Users-------01-proj"),
+        ("/home/me/my.proj", "-home-me-my-proj"),
+    ], ids=["latin", "at-and-dots", "dots", "cyrillic", "posix"])
+    def test_key(self, path, key):
+        assert bootstrap.claude_project_key(path) == key
+
+
+def _old_memory(project, files):
+    """The memory Claude Code kept for project before .memory existed."""
+    old = (Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects"
+           / bootstrap.claude_project_key(project) / "memory")
+    old.mkdir(parents=True)
+    for name, text in files.items():
+        write_verbatim(old / name, text)
+    return old
+
+
+def _local_settings(project):
+    path = project / ".claude" / "settings.local.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+class TestProjectMemorySetting:
+    def test_points_auto_memory_at_the_project(self, tmp_path):
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        value = _local_settings(tmp_path)["autoMemoryDirectory"]
+        assert Path(value) == tmp_path / ".memory"
+
+    def test_keeps_what_else_is_in_the_file(self, tmp_path):
+        write_verbatim(tmp_path / ".claude" / "settings.local.json",
+                       json.dumps({"permissions": {"allow": ["Bash(ls)"]}}))
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        data = _local_settings(tmp_path)
+        assert data["permissions"] == {"allow": ["Bash(ls)"]}
+        assert "autoMemoryDirectory" in data
+
+    def test_a_folder_you_chose_is_left_alone(self, tmp_path, capsys):
+        mine = str(tmp_path / "elsewhere")
+        write_verbatim(tmp_path / ".claude" / "settings.local.json",
+                       json.dumps({"autoMemoryDirectory": mine}))
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _local_settings(tmp_path)["autoMemoryDirectory"] == mine
+        assert "left as is" in capsys.readouterr().out
+
+    def test_an_unreadable_settings_file_is_not_touched(self, tmp_path, capsys):
+        path = tmp_path / ".claude" / "settings.local.json"
+        write_verbatim(path, "{ not json")
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert read_verbatim(path) == "{ not json"
+        assert "settings.local.json" in capsys.readouterr().out
+
+
+class TestOldMemoryIsCopied:
+    def test_files_are_copied_and_the_old_folder_stays(self, tmp_path):
+        old = _old_memory(tmp_path, {"MEMORY.md": "- [a](a.md)\n",
+                                     "a.md": "fact a\n"})
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert read_verbatim(tmp_path / ".memory" / "a.md") == "fact a\n"
+        assert read_verbatim(tmp_path / ".memory" / "MEMORY.md") == "- [a](a.md)\n"
+        assert (old / "a.md").exists(), "the old memory must not be removed"
+
+    def test_a_different_file_already_there_is_not_overwritten(self, tmp_path, capsys):
+        _old_memory(tmp_path, {"a.md": "old a\n"})
+        write_verbatim(tmp_path / ".memory" / "a.md", "a from git\n")
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert read_verbatim(tmp_path / ".memory" / "a.md") == "a from git\n"
+        beside = tmp_path / ".memory" / "a.from-old-memory.md"
+        assert read_verbatim(beside) == "old a\n"
+        assert "a.from-old-memory.md" in capsys.readouterr().out
+
+    def test_the_same_file_makes_no_copy_beside_it(self, tmp_path):
+        _old_memory(tmp_path, {"a.md": "same\n"})
+        write_verbatim(tmp_path / ".memory" / "a.md", "same\n")
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert sorted(p.name for p in (tmp_path / ".memory").iterdir()) == ["a.md"]
+
+    def test_memory_md_is_merged_line_by_line(self, tmp_path):
+        _old_memory(tmp_path, {"MEMORY.md": "- [a](a.md)\n- [b](b.md)\n"})
+        write_verbatim(tmp_path / ".memory" / "MEMORY.md",
+                       "- [c](c.md)\n- [a](a.md)\n")
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert read_verbatim(tmp_path / ".memory" / "MEMORY.md") == (
+            "- [c](c.md)\n- [a](a.md)\n- [b](b.md)\n")
+
+    def test_the_merge_keeps_the_line_endings_of_the_index(self, tmp_path):
+        _old_memory(tmp_path, {"MEMORY.md": "- [b](b.md)\n"})
+        write_verbatim(tmp_path / ".memory" / "MEMORY.md", "- [a](a.md)\r\n")
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert read_verbatim(tmp_path / ".memory" / "MEMORY.md") == (
+            "- [a](a.md)\r\n- [b](b.md)\r\n")
+
+    def test_an_unreadable_old_file_does_not_stop_the_run(self, tmp_path, monkeypatch, capsys):
+        _old_memory(tmp_path, {"a.md": "a\n"})
+
+        def broken(*a, **kw):
+            raise PermissionError(13, "Permission denied")
+        monkeypatch.setattr(bootstrap, "migrate_old_memory", broken)
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert "could not copy the old memory" in capsys.readouterr().out
+        assert "autoMemoryDirectory" in _local_settings(tmp_path)
+
+    def test_no_old_memory_is_not_an_error(self, tmp_path):
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert (tmp_path / ".memory").is_dir()
+
+
+class TestRunningTwiceAddsNothing:
+    def test_second_run_changes_nothing(self, tmp_path):
+        _old_memory(tmp_path, {"MEMORY.md": "- [a](a.md)\n", "a.md": "old a\n"})
+        write_verbatim(tmp_path / ".memory" / "a.md", "a from git\n")
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        before = _snapshot(tmp_path)
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert _snapshot(tmp_path) == before
+
+    def test_memory_that_moved_on_is_not_copied_over_again(self, tmp_path):
+        """Once .memory is the memory, the old folder is history: copying it
+        again would park a stale twin beside every file Claude has updated."""
+        _old_memory(tmp_path, {"a.md": "v1\n"})
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+        write_verbatim(tmp_path / ".memory" / "a.md", "v2\n")
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert sorted(p.name for p in (tmp_path / ".memory").iterdir()) == ["a.md"]
+
+
+class TestMemoryInGitignore:
+    def _ignored(self, project):
+        path = project / ".gitignore"
+        return path.exists() and "/.memory/" in path.read_text(encoding="utf-8")
+
+    def test_public_repository_ignores_it(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(bootstrap, "repo_visibility", lambda pd: "PUBLIC")
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert self._ignored(tmp_path)
+        assert "/.memory/" in capsys.readouterr().out
+
+    def test_unknown_visibility_ignores_it(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bootstrap, "repo_visibility", lambda pd: None)
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert self._ignored(tmp_path)
+
+    def test_private_repository_commits_it(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bootstrap, "repo_visibility", lambda pd: "PRIVATE")
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert not self._ignored(tmp_path)
+
+    def test_an_entry_already_there_is_not_repeated_and_gh_is_not_asked(
+            self, tmp_path, monkeypatch):
+        write_verbatim(tmp_path / ".gitignore", "node_modules/\r\n.memory\r\n")
+        monkeypatch.setattr(bootstrap, "repo_visibility", _explode)
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert read_verbatim(tmp_path / ".gitignore") == "node_modules/\r\n.memory\r\n"
+
+    def test_appending_keeps_the_line_endings(self, tmp_path):
+        write_verbatim(tmp_path / ".gitignore", "node_modules/\r\n")
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        text = read_verbatim(tmp_path / ".gitignore")
+        assert text.startswith("node_modules/\r\n")
+        assert "/.memory/\r\n" in text
+        assert "\n" not in text.replace("\r\n", "")
+
+
+class TestRepoVisibility:
+    """Asks gh about origin by name: with several remotes and no gh default,
+    a bare `gh repo view` picks upstream, and a private upstream would let
+    .memory be committed to a public origin."""
+
+    def _with(self, monkeypatch, origin=(0, "https://github.com/me/proj.git\n"),
+              result=(0, "PUBLIC\n"), error=None):
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: name)
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:2] == ["git", "remote"]:
+                assert cmd == ["git", "remote", "get-url", "origin"]
+                if isinstance(origin, Exception):
+                    raise origin
+                return SimpleNamespace(returncode=origin[0], stdout=origin[1], stderr="")
+            assert cmd[:3] == ["gh", "repo", "view"]
+            if error:
+                raise error
+            return SimpleNamespace(returncode=result[0], stdout=result[1], stderr="")
+        monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+        return calls
+
+    def test_public(self, tmp_path, monkeypatch):
+        self._with(monkeypatch)
+        assert _REAL_REPO_VISIBILITY(tmp_path) == "PUBLIC"
+
+    @pytest.mark.parametrize("url, repo", [
+        ("https://github.com/me/proj.git", "github.com/me/proj"),
+        ("https://github.com/me/proj", "github.com/me/proj"),
+        ("https://token@github.com/me/proj.git", "github.com/me/proj"),
+        ("git@github.com:me/proj.git", "github.com/me/proj"),
+        ("ssh://git@github.com/me/proj.git", "github.com/me/proj"),
+        ("ssh://git@ghe.corp:2222/team/proj", "ghe.corp/team/proj"),
+    ], ids=["https", "https-bare", "https-token", "scp", "ssh", "ssh-port"])
+    def test_asks_about_origin_by_name(self, tmp_path, monkeypatch, url, repo):
+        calls = self._with(monkeypatch, origin=(0, url + "\n"))
+
+        _REAL_REPO_VISIBILITY(tmp_path)
+
+        gh = [c for c in calls if c[0] == "gh"]
+        assert gh and gh[0][3] == repo
+
+    def test_no_origin_is_unknown_and_gh_is_not_asked(self, tmp_path, monkeypatch):
+        calls = self._with(monkeypatch, origin=(2, ""))
+        assert _REAL_REPO_VISIBILITY(tmp_path) is None
+        assert not [c for c in calls if c[0] == "gh"]
+
+    def test_an_origin_that_is_not_a_repo_url_is_unknown(self, tmp_path, monkeypatch):
+        calls = self._with(monkeypatch, origin=(0, "../local/clone\n"))
+        assert _REAL_REPO_VISIBILITY(tmp_path) is None
+        assert not [c for c in calls if c[0] == "gh"]
+
+    @pytest.mark.parametrize("url", [
+        "https://github.com/me/a&b",
+        "git@github.com:me/a|b.git",
+    ], ids=["ampersand", "pipe"])
+    def test_shell_characters_in_origin_are_unknown(self, tmp_path, monkeypatch, url):
+        # On Windows gh runs through cmd, which would read these unquoted.
+        calls = self._with(monkeypatch, origin=(0, url + "\n"))
+        assert _REAL_REPO_VISIBILITY(tmp_path) is None
+        assert not [c for c in calls if c[0] == "gh"]
+
+    def test_git_fails_to_start(self, tmp_path, monkeypatch):
+        self._with(monkeypatch, origin=OSError("no git"))
+        assert _REAL_REPO_VISIBILITY(tmp_path) is None
+
+    def test_gh_fails(self, tmp_path, monkeypatch):
+        self._with(monkeypatch, result=(1, ""))
+        assert _REAL_REPO_VISIBILITY(tmp_path) is None
+
+    def test_gh_hangs(self, tmp_path, monkeypatch):
+        self._with(monkeypatch, error=subprocess.TimeoutExpired("gh", 15))
+        assert _REAL_REPO_VISIBILITY(tmp_path) is None
+
+    def test_no_gh(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+        monkeypatch.setattr(bootstrap.subprocess, "run", _explode)
+        assert _REAL_REPO_VISIBILITY(tmp_path) is None
+
+
+class TestProjectMemoryDryRun:
+    def test_writes_nothing_and_says_what_it_would_do(self, tmp_path, capsys):
+        old = _old_memory(tmp_path, {"MEMORY.md": "- [a](a.md)\n", "a.md": "a\n"})
+        config = Path(os.environ["CLAUDE_CONFIG_DIR"])
+        project_before, config_before = _snapshot(tmp_path), _snapshot(config)
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=True)
+
+        assert _snapshot(tmp_path) == project_before
+        assert not (tmp_path / ".memory").exists()
+        assert _snapshot(config) == config_before
+        out = capsys.readouterr().out
+        assert "[DRY-RUN]" in out and "autoMemoryDirectory" in out
+        assert old.exists()
+
+
+class TestProjectMemoryInAFullRun:
+    @pytest.mark.parametrize("path", [CLAUDE_EN, CLAUDE_RU], ids=["en", "ru"])
+    def test_the_index_is_imported_inside_the_managed_block(self, path):
+        text = path.read_text(encoding="utf-8")
+        start, end = bootstrap.marked_span(text)
+        assert "\n@.memory/MEMORY.md\n" in text[start:end]
+
+    def test_bootstrap_sets_it_up_without_asking(self, tmp_path, monkeypatch):
+        _old_memory(tmp_path, {"a.md": "a\n"})
+
+        assert _run_bootstrap(tmp_path, monkeypatch) == 0
+
+        assert (tmp_path / ".memory" / "a.md").exists()
+        assert "autoMemoryDirectory" in _local_settings(tmp_path)
+        assert "@.memory/MEMORY.md" in (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+
+    def test_an_upgrade_cleanup_keeps_the_setting(self, tmp_path, monkeypatch):
+        """The cleanup removes a settings.local.json with nothing but empty
+        hooks in it; the memory setting is something in it."""
+        write_verbatim(tmp_path / ".claude" / "settings.local.json",
+                       json.dumps({"hooks": {}}))
+
+        assert _run_bootstrap(tmp_path, monkeypatch, upgrade=True) == 0
+
+        assert "autoMemoryDirectory" in _local_settings(tmp_path)
+
+    def test_batch_upgrade_asks_nothing(self, tmp_path, monkeypatch):
+        _stub_external(monkeypatch)
+        monkeypatch.setattr("builtins.input", _explode)
+        child = tmp_path / "proj"
+        (child / ".beads").mkdir(parents=True)
+        _old_memory(child, {"a.md": "a\n"})
+
+        assert bootstrap.run_batch_upgrade(tmp_path, True, "en", False, False) == 0
+
+        assert (child / ".memory" / "a.md").exists()
+
+
+class TestProjectMemoryLongPath:
+    """Claude Code cuts a key over 200 characters and adds a hash nobody can
+    rebuild here, so the old folder of such a project cannot be found."""
+
+    def test_old_memory_dir_is_unknown_for_a_long_key(self):
+        assert bootstrap.old_memory_dir(Path("C:/" + "a" * 250)) is None
+
+    def test_old_memory_dir_is_known_at_200(self):
+        assert bootstrap.old_memory_dir(Path("/" + "a" * 199)) is not None
+
+    def test_setting_is_written_and_copying_is_left_to_you(
+            self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(bootstrap, "claude_project_key", lambda pd: "k" * 201)
+
+        bootstrap.setup_project_memory(tmp_path, dry_run=False)
+
+        assert "autoMemoryDirectory" in _local_settings(tmp_path)
+        out = capsys.readouterr().out
+        assert "by hand" in out and ".memory" in out
+
+
+class TestProjectMemorySettingEncoding:
+    def test_a_cyrillic_path_stays_readable(self, tmp_path):
+        project = tmp_path / "\u043f\u0440\u043e\u0435\u043a\u0442"
+        project.mkdir()
+
+        bootstrap.setup_project_memory(project, dry_run=False)
+
+        raw = (project / ".claude" / "settings.local.json").read_bytes()
+        assert "\u043f\u0440\u043e\u0435\u043a\u0442".encode("utf-8") in raw
+        assert b"\\u043f" not in raw
+
+
+# ============================================================================
 # Shared memory — one per machine, in the user's Claude config folder
 # ============================================================================
 # tests/conftest.py points CLAUDE_CONFIG_DIR at a temporary folder for every

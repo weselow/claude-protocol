@@ -1,16 +1,25 @@
-"""Shared pytest setup for the bootstrap tests."""
+"""Keep every test away from the real ~/.claude and the real `gh`.
+
+A bootstrap run reads and writes Claude Code's folder — the plugin registry,
+the old project memory in projects/<key>/memory, shared memory and the
+user-level CLAUDE.md — and asks `gh` whether the repository is public. On a
+developer's machine both are real: a test would read their memory, and its
+answer would depend on whether `gh` is logged in. Each test gets an empty
+config folder of its own and a repository whose visibility nobody could tell.
+A test that needs something else sets it itself.
+"""
+import sys
+from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import bootstrap  # noqa: E402
+
 
 @pytest.fixture(autouse=True)
-def _claude_config_is_never_the_real_one(tmp_path_factory, monkeypatch):
-    """No test reads or writes the real ~/.claude.
-
-    bootstrap writes into the user's Claude config folder (shared memory, the
-    user-level CLAUDE.md) and reads Claude Code's plugin records from it. A test
-    that wants a particular folder sets CLAUDE_CONFIG_DIR itself; this is only
-    the floor under the ones that do not think about it.
-    """
+def _no_real_claude_dir_or_gh(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR",
                        str(tmp_path_factory.mktemp("claude-config")))
+    monkeypatch.setattr(bootstrap, "repo_visibility", lambda project_dir: None)
