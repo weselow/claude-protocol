@@ -897,6 +897,47 @@ class TestCleanupObsolete:
         backup_root = Path(report["backups"][0])
         assert (backup_root / "obsolete" / "settings.json").exists()
 
+    def _strip_session_start(self, tmp_path, monkeypatch, session_start):
+        """Run cleanup on a settings.json with one SessionStart list."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_DIRS", [])
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings = claude_dir / "settings.json"
+        settings.write_text(json.dumps({"hooks": {"SessionStart": session_start}}))
+        report = cleanup_obsolete(tmp_path, {"files": {}}, dry_run=False)
+        return report, json.loads(settings.read_text())
+
+    def test_bd_prime_first_in_group_keeps_user_hook(self, tmp_path, monkeypatch):
+        """A group with `bd prime` first loses only `bd prime`, not the user's hook."""
+        report, updated = self._strip_session_start(tmp_path, monkeypatch, [
+            {"hooks": [{"type": "command", "command": "bd prime"},
+                       {"type": "command", "command": "node my-own.cjs"}]},
+        ])
+        assert report["stripped_settings_hooks"] == ["bd prime"]
+        assert updated["hooks"]["SessionStart"] == [
+            {"hooks": [{"type": "command", "command": "node my-own.cjs"}]},
+        ]
+
+    def test_bd_prime_second_in_group_is_removed(self, tmp_path, monkeypatch):
+        """`bd prime` in second position goes, the first hook stays."""
+        report, updated = self._strip_session_start(tmp_path, monkeypatch, [
+            {"hooks": [{"type": "command", "command": "node a.cjs"},
+                       {"type": "command", "command": "bd prime"}]},
+        ])
+        assert report["stripped_settings_hooks"] == ["bd prime"]
+        assert updated["hooks"]["SessionStart"] == [
+            {"hooks": [{"type": "command", "command": "node a.cjs"}]},
+        ]
+
+    def test_emptied_event_key_is_removed(self, tmp_path, monkeypatch):
+        """An event left with no entries is dropped; the hooks object stays."""
+        report, updated = self._strip_session_start(tmp_path, monkeypatch, [
+            {"hooks": [{"type": "command", "command": "bd prime"}]},
+        ])
+        assert report["stripped_settings_hooks"] == ["bd prime"]
+        assert updated["hooks"] == {}
+
     def test_removes_manifest_dir_with_nested_entries(self, tmp_path, monkeypatch):
         """Directory removal also strips matching manifest entries."""
         monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [])

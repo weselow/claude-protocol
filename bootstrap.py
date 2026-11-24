@@ -777,16 +777,37 @@ def _upgrade_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _hook_command_matches(hook_entry: dict, patterns: list) -> tuple:
-    """Return (command_str, matched) for a hook entry dict.
+def _hook_matches(hook: dict, patterns: list) -> str:
+    """Return the hook's command if it contains any of `patterns`, else ""."""
+    cmd = hook.get("command", "") if isinstance(hook, dict) else ""
+    if isinstance(cmd, str) and any(p in cmd for p in patterns):
+        return cmd
+    return ""
 
-    Tolerant of malformed entries — returns ("", False) on any structural error.
+
+def _strip_entry_hooks(entry: dict, patterns: list) -> tuple:
+    """Remove matching hooks from one entry. Returns (entry_or_None, stripped).
+
+    Checks every hook in the entry's "hooks" list, not only the first, so a
+    user's own hook grouped with an obsolete one survives. The entry is
+    dropped (None) only when nothing is left in it. Malformed entries are
+    kept untouched.
     """
-    try:
-        cmd = hook_entry.get("hooks", [{}])[0].get("command", "") or ""
-    except Exception:
-        return "", False
-    return cmd, any(p in cmd for p in patterns)
+    hooks = entry.get("hooks") if isinstance(entry, dict) else None
+    if not isinstance(hooks, list):
+        return entry, []
+    kept, stripped = [], []
+    for hook in hooks:
+        cmd = _hook_matches(hook, patterns)
+        if cmd:
+            stripped.append(cmd)
+        else:
+            kept.append(hook)
+    if not stripped:
+        return entry, []
+    if not kept:
+        return None, stripped
+    return {**entry, "hooks": kept}, stripped
 
 
 def _load_hooks_section(settings_path: Path) -> tuple:
@@ -807,11 +828,10 @@ def _partition_entries(entries: list, patterns: list) -> tuple:
     """Split hook entries into (kept_entries, stripped_commands) for one event."""
     kept, stripped = [], []
     for entry in entries:
-        cmd, matched = _hook_command_matches(entry, patterns)
-        if matched:
-            stripped.append(cmd)
-        else:
-            kept.append(entry)
+        new_entry, cmds = _strip_entry_hooks(entry, patterns)
+        stripped.extend(cmds)
+        if new_entry is not None:
+            kept.append(new_entry)
     return kept, stripped
 
 
@@ -829,7 +849,10 @@ def _strip_obsolete_hooks(
         if not isinstance(entries, list):
             continue
         kept, stripped = _partition_entries(entries, patterns)
-        hooks[event] = kept
+        if stripped and not kept:
+            del hooks[event]  # nothing left for this event; keep "hooks" itself
+        else:
+            hooks[event] = kept
         all_stripped.extend(stripped)
     if all_stripped and not dry_run:
         # Ask for the backup directory only now — calling backup_fn() eagerly
