@@ -317,8 +317,9 @@ Full details: [docs/decisions-en.md](docs/decisions-en.md)
   agents/
     code-reviewer.md        # Reviews a bead, following bead-review
     merge-supervisor.md     # Conflict resolution protocol
-  hooks/                    # 4 Node.js hooks (3 enforcement, 1 memory
-                            # pointer), shared utils, the update checker
+  hooks/                    # 4 Node.js hooks (2 enforcement, session
+                            # start, memory pointer), shared utils, the
+                            # update checker
   rules/
     beads-workflow.md       # Task lifecycle, bd command reference
     pre-code-workflow.md    # Three gates before any edit
@@ -402,7 +403,8 @@ line per file in `MEMORY.md`.
   init asks once; `--shared-memory` answers without the question.
 - **Where to write** — a marked block in `~/.claude/CLAUDE.md`: "will this
   help in another project?" Yes — shared; not sure — project. Never
-  passwords, tokens or keys.
+  passwords, tokens or keys. The block is written once shared memory is set
+  up; until then lessons go to project memory.
 
 What keeps them in reach:
 
@@ -417,8 +419,9 @@ What keeps them in reach:
 - **`/memory-sort`** (`/claude-protocol:memory-sort` with the plugin)
   proposes which project-memory files belong in shared memory. Only what
   you confirm moves.
-- **Closing a session** — Claude says what it wrote and where, and offers
-  to move this session's lessons that fit other projects to shared memory.
+- **Closing a session** — Claude says what it wrote and where, and, once
+  shared memory is set up, offers to move this session's lessons that fit
+  other projects there.
 
 ### Project discovery
 
@@ -466,8 +469,9 @@ one at a time with no explanation.
 The same thing, installed through Claude Code's own plugin system. The plugin
 carries the hooks, the agents and the skills (project-discovery,
 bead-review and memory-sort), and updates them for you. What a plugin cannot carry is the half
-that has to live in the project — the beads database, `.claude/rules/*.md` and
-the block in `CLAUDE.md` — so one command lays that half down.
+that has to live in the project — the beads database, `.claude/rules/*.md`,
+the block in `CLAUDE.md` and project memory (`.memory/` and
+`settings.local.json`) — so one command lays that half down.
 
 ```
 /plugin marketplace add weselow/claude-protocol
@@ -509,7 +513,7 @@ source ends up supplying the hooks.
 | `--force` | Take our version of every file, no questions asked (yours is kept in `.claude/.upgrades/`) |
 | `--keep-mine` | Keep your version of every file you edited, no questions asked |
 | `--install-beads` | Install the beads CLI without asking (default: ask, and install nothing when nobody can answer) |
-| `--project-only` | Install only what a plugin cannot carry — beads, rules, CLAUDE.md — and hand hooks, agents and skills over to the plugin. This is what `/claude-protocol:init` runs |
+| `--project-only` | Install only what a plugin cannot carry — beads, rules, CLAUDE.md, project memory (`.memory/`, `settings.local.json`) — and hand hooks, agents and skills over to the plugin. This is what `/claude-protocol:init` runs |
 | `--shared-memory CHOICE` | Shared memory for every project on this machine, answered without the question: `existing <url>`, `new` (private `<login>/claude-memory` via gh), `local` (folder without git), `never`. Asked once per machine; the answer is kept in `~/.claude/claude-protocol.json` |
 
 ### Local development (before npm publish)
@@ -718,13 +722,13 @@ A: Rules, agents and skills you edited become a question, one file at a time, wi
 A: Yes. Beads works with SQLite by default. Dolt adds version history and branching for the task database.
 
 **Q: Where does memory live, and how does it get to another machine?**
-A: Project memory is `.memory/` in the project: a private repository commits it, a public one ignores it and keeps it local. Shared memory is `~/.claude/shared-memory`. As a git repository it is pushed after each write and pulled at session start; on a new machine connect the same repository: `npx claude-protocol init --shared-memory existing <url>`.
+A: Project memory is `.memory/` in the project: a private repository commits it, a public one ignores it and keeps it local. Shared memory is `~/.claude/shared-memory`. When it is a git repository, it is pushed after each write and pulled at session start; on a new machine connect the same repository: `npx claude-protocol init --shared-memory existing <url>`.
 
 **Q: I answered "not now". How do I set up shared memory later?**
 A: The question is not asked again, but the flag works: `npx claude-protocol init --shared-memory new` (or `existing <url>`, `local`). Once shared memory is set up, the flag is ignored.
 
 **Q: What happened to `bd remember`?**
-A: The rules no longer use it. Lessons go to project or shared memory, as the block in `~/.claude/CLAUDE.md` says. init and upgrade copy every `bd memories` entry into `.memory/`; bd keeps its own copy as a backup.
+A: The rules no longer use it. Lessons go to project or shared memory, as the block in `~/.claude/CLAUDE.md` says; that block is written once shared memory is set up, and without it lessons go to project memory. init and upgrade copy every `bd memories` entry into `.memory/`; bd keeps its own copy as a backup.
 
 ## Credits
 
