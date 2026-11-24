@@ -58,6 +58,7 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+- **Project memory moves into `.memory/` in the project** — bootstrap sets `autoMemoryDirectory` in `.claude/settings.local.json`, copies the old memory from `~/.claude/projects/<key>/memory` (a file that differs is never overwritten: the old one goes beside it as `*.from-old-memory.md`; `MEMORY.md` is merged line by line; the old folder stays), and imports `@.memory/MEMORY.md` in the managed CLAUDE.md block so agents see the index too. A public repository, or one whose visibility `gh` cannot tell, gets `/.memory/` in `.gitignore`; a private one commits it.
 - **Shared memory, one per machine** — init and upgrade ask once: connect an existing repository, create a private `<login>/claude-memory` with gh, use a local folder without git, or not now (remembered). The folder is `~/.claude/shared-memory` (`CLAUDE_CONFIG_DIR` respected); a marked block in `~/.claude/CLAUDE.md` says which memory to write to and loads its `MEMORY.md`. Nothing outside the markers is touched, and the file is backed up to `~/.claude/claude-protocol-backups/` before each change. Runs nobody can answer (`--all`, CI, the plugin's `/claude-protocol:init`) ask nothing and print the flag instead: `--shared-memory existing <url> | new | local | never`.
 - **Upgrade removes `bd prime` from `.claude/settings.json` too** — before, only `settings.local.json` was cleaned; the hook dumps all of bd's memory, which Claude Code cuts to 2,000 characters anyway.
 

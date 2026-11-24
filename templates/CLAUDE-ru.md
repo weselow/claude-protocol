@@ -76,6 +76,14 @@ bd dep relate {NEW_ID} {OLD_ID}
 - merge-supervisor — разрешение конфликтов при слиянии, перебазировании
   (rebase) и переносе коммитов (cherry-pick)
 
+## Память проекта
+
+Память Claude Code по этому проекту лежит в `.memory/` (так задаёт
+`autoMemoryDirectory` в `.claude/settings.local.json`). Её оглавление
+подключено здесь, чтобы его видели и подрядчики:
+
+@.memory/MEMORY.md
+
 <!-- claude-protocol:end -->
 
 ## Текущее состояние

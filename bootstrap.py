@@ -1994,6 +1994,276 @@ def setup_gitignore(installer: Installer) -> None:
 
 
 # ============================================================================
+# PROJECT MEMORY (.memory)
+# ============================================================================
+# Claude Code keeps a project's memory in <config>/projects/<key>/memory: on
+# one machine only, tied to the path, unseen by agents. autoMemoryDirectory
+# moves it into the project, where git carries it between machines and the
+# managed CLAUDE.md block imports its index for agents too.
+
+MEMORY_DIR = ".memory"
+MEMORY_INDEX = "MEMORY.md"
+MEMORY_GITIGNORE = "/.memory/"
+_OLD_MEMORY_SUFFIX = ".from-old-memory"
+# Claude Code cuts a longer key to this length and adds a hash of its own.
+_MAX_PROJECT_KEY = 200
+
+
+def claude_project_key(project_dir) -> str:
+    """The folder name Claude Code gives a project under <config>/projects.
+
+    Every character that is not an ASCII letter or digit becomes a dash — one
+    per UTF-16 unit, the way the JavaScript replace that builds it counts:
+    M:\\repos\\a.b -> M--repos-a-b, and each Cyrillic letter is one dash.
+
+    A key over 200 characters is returned whole: Claude Code cuts such a key
+    and appends a hash it does not document, so its folder name cannot be
+    rebuilt here — old_memory_dir gives up on it instead of guessing.
+    """
+    out = []
+    for ch in str(project_dir):
+        if ch.isascii() and ch.isalnum():
+            out.append(ch)
+        else:
+            out.append("-" * (len(ch.encode("utf-16-le")) // 2))
+    return "".join(out)
+
+
+def old_memory_dir(project_dir: Path) -> Path | None:
+    """Where Claude Code kept this project's memory before .memory.
+
+    None when the key is over 200 characters: Claude Code shortens it with a
+    hash we cannot reproduce, so that folder cannot be found.
+    """
+    key = claude_project_key(project_dir)
+    if len(key) > _MAX_PROJECT_KEY:
+        return None
+    return _claude_config_dir() / "projects" / key / "memory"
+
+
+_REMOTE_URL = re.compile(
+    r"^(?:[a-z+]+://(?:[^@/]+@)?(?P<h1>[^/:]+)(?::\d+)?/"
+    r"|[^@/]+@(?P<h2>[^/:]+):)"
+    r"(?P<path>[\w.-]+/[\w.-]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
+)
+
+
+def _repo_from_url(url: str) -> str | None:
+    """HOST/OWNER/REPO from a remote URL, as gh takes it; None if it is not one."""
+    m = _REMOTE_URL.match(url.strip())
+    if not m:
+        return None
+    return f"{m.group('h1') or m.group('h2')}/{m.group('path')}"
+
+
+def _quiet_run(cmd: list, cwd: Path):
+    """Run cmd; the CompletedProcess, or None when it could not run or hung."""
+    try:
+        return subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, shell=_SHELL,
+            stdin=subprocess.DEVNULL, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def repo_visibility(project_dir: Path) -> str | None:
+    """PUBLIC, PRIVATE or INTERNAL as GitHub says; None when nobody can tell.
+
+    gh is asked about origin by name: a bare `gh repo view` in a clone with
+    several remotes and no gh default picks upstream, and a private upstream
+    would let .memory be committed to a public origin. No origin -> None.
+    """
+    if shutil.which("gh") is None:
+        return None
+    origin = _quiet_run(["git", "remote", "get-url", "origin"], project_dir)
+    if origin is None or origin.returncode != 0:
+        return None
+    repo = _repo_from_url(origin.stdout or "")
+    if repo is None:
+        return None
+    result = _quiet_run(["gh", "repo", "view", repo, "--json", "visibility",
+                         "-q", ".visibility"], project_dir)
+    if result is None or result.returncode != 0:
+        return None
+    answer = (result.stdout or "").strip().upper()
+    return answer or None
+
+
+def _newline_of(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _set_memory_setting(project_dir: Path, dry_run: bool) -> str:
+    """Point autoMemoryDirectory at .memory in settings.local.json.
+
+    Returns "set" when this run points it there, "already" when it pointed
+    there before, "skip" when the file cannot be used or names another folder.
+    settings.local.json, because the path differs from machine to machine and
+    that file never reaches git.
+    """
+    path = project_dir / ".claude" / "settings.local.json"
+    ours = (project_dir / MEMORY_DIR).as_posix()
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(read_verbatim(path))
+            if not isinstance(data, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError) as e:
+            print(f"  - settings.local.json could not be read ({e}) — left as is;")
+            print(f'    add "autoMemoryDirectory": "{ours}" by hand')
+            return "skip"
+    current = data.get("autoMemoryDirectory")
+    if current and _same_dir(current, ours):
+        return "already"
+    if current:
+        print(f"  - autoMemoryDirectory already names {current} — left as is")
+        return "skip"
+    data["autoMemoryDirectory"] = ours
+    if not dry_run:
+        write_verbatim(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    print(f"  - {_dry(dry_run)}settings.local.json: autoMemoryDirectory -> {ours}")
+    return "set"
+
+
+def _merge_memory_index(old: Path, new: Path, dry_run: bool) -> int:
+    """Add the old index's lines that the new one lacks. Returns how many."""
+    old_lines = read_verbatim(old).splitlines()
+    text = read_verbatim(new)
+    have = {line.strip() for line in text.splitlines()}
+    missing = []
+    for line in old_lines:
+        if line.strip() and line.strip() not in have:
+            missing.append(line)
+            have.add(line.strip())
+    if missing and not dry_run:
+        nl = _newline_of(text)
+        if text and not text.endswith(("\n", "\r")):
+            text += nl
+        write_verbatim(new, text + nl.join(missing) + nl)
+    return len(missing)
+
+
+def _beside(dest: Path, data: bytes) -> tuple:
+    """Where the old copy of a clashing file goes, and whether it is there already."""
+    n = 1
+    while True:
+        tail = _OLD_MEMORY_SUFFIX + (f"-{n}" if n > 1 else "")
+        spot = dest.with_name(dest.stem + tail + dest.suffix)
+        if not spot.exists():
+            return spot, False
+        if spot.is_file() and spot.read_bytes() == data:
+            return spot, True
+        n += 1
+
+
+def _copy_one_memory_file(src: Path, dest: Path, dry_run: bool, report: dict) -> None:
+    data = src.read_bytes()
+    if not dest.exists():
+        if not dry_run:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+        report["copied"] += 1
+        return
+    if dest.is_file() and dest.read_bytes() == data:
+        return
+    spot, there = _beside(dest, data)
+    if not there and not dry_run:
+        spot.write_bytes(data)
+    report["beside"].append((dest, spot))
+
+
+def migrate_old_memory(old: Path, new: Path, dry_run: bool) -> dict:
+    """Copy the old memory into .memory without overwriting anything.
+
+    A file already in .memory (it may have come through git from another
+    machine) that differs keeps its place; the old one goes beside it. The
+    index is merged line by line instead. The old folder is left as it was.
+    """
+    report = {"copied": 0, "beside": [], "index_lines": 0}
+    for src in sorted(p for p in old.rglob("*") if p.is_file()):
+        rel = src.relative_to(old)
+        dest = new / rel
+        if rel == Path(MEMORY_INDEX) and dest.is_file():
+            report["index_lines"] = _merge_memory_index(src, dest, dry_run)
+        else:
+            _copy_one_memory_file(src, dest, dry_run, report)
+    return report
+
+
+def _report_migration(old: Path, report: dict, project_dir: Path, dry_run: bool) -> None:
+    pre = _dry(dry_run)
+    if report["copied"]:
+        print(f"  - {pre}copied {report['copied']} file(s) from {old} (left in place)")
+    if report["index_lines"]:
+        print(f"  - {pre}{MEMORY_INDEX}: added {report['index_lines']} line(s) "
+              "from the old index")
+    for dest, spot in report["beside"]:
+        print(f"  - {dest.relative_to(project_dir).as_posix()} differs from the old "
+              f"one — {pre}old one put beside it: "
+              f"{spot.relative_to(project_dir).as_posix()}")
+    if report["beside"]:
+        print("    Compare each pair and keep what is right; nothing was overwritten.")
+
+
+def _ignore_memory_dir(project_dir: Path, dry_run: bool) -> None:
+    """Keep .memory out of git unless the repository is known to be private."""
+    path = project_dir / ".gitignore"
+    if path.exists() and not path.is_file():
+        print("  - .gitignore is not a file — /.memory/ not added")
+        return
+    text = read_verbatim(path) if path.exists() else ""
+    wanted = _gitignore_key(MEMORY_GITIGNORE)
+    if any(_gitignore_key(line) == wanted for line in text.splitlines()):
+        return
+    visibility = repo_visibility(project_dir)
+    if visibility in ("PRIVATE", "INTERNAL"):
+        print(f"  - repository is {visibility.lower()}: .memory is committed with it")
+        return
+    why = ("the repository is public" if visibility == "PUBLIC"
+           else "could not tell whether the repository is public")
+    if not dry_run:
+        nl = _newline_of(text)
+        lead = nl if text and not text.endswith(("\n", "\r")) else ""
+        write_verbatim(path, f"{text}{lead}{nl}# Project memory{nl}"
+                             f"{MEMORY_GITIGNORE}{nl}")
+    print(f"  - {_dry(dry_run)}.gitignore: added {MEMORY_GITIGNORE} ({why})")
+
+
+def setup_project_memory(project_dir: Path, dry_run: bool) -> None:
+    """Move this project's memory into <project>/.memory. Asks nothing.
+
+    The old memory is copied only by the run that points the setting at
+    .memory: from then on .memory is the memory, and copying the old folder
+    again would park a stale twin beside every file Claude has since updated.
+    """
+    print("\nProject memory (.memory)...")
+    new = project_dir / MEMORY_DIR
+    if new.exists() and not new.is_dir():
+        print(f"  - {MEMORY_DIR} is a file, not a folder — memory left where it is")
+        return
+    state = _set_memory_setting(project_dir, dry_run)
+    old = old_memory_dir(project_dir)
+    if state == "set" and old is None:
+        print("  - the path is too long to find the old memory folder under "
+              f"{_claude_config_dir() / 'projects'}; copy it into {MEMORY_DIR} by hand")
+    elif state == "set" and old.is_dir():
+        try:
+            report = migrate_old_memory(old, new, dry_run)
+        except (OSError, ValueError) as e:
+            print(f"  - could not copy the old memory from {old}: {e}")
+            print("    Nothing there was removed; copy what is left by hand.")
+        else:
+            _report_migration(old, report, project_dir, dry_run)
+    if not dry_run:
+        new.mkdir(exist_ok=True)
+    _ignore_memory_dir(project_dir, dry_run)
+    print("  DONE")
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -2121,6 +2391,7 @@ def bootstrap_project(
     copy_settings_and_claude_md(resolved_name, installer,
                                 with_settings=not project_only, lang=lang)
     setup_gitignore(installer)
+    setup_project_memory(project_dir, dry_run)
 
     if project_only:
         _report_handover(hand_over_to_plugin(project_dir, manifest, dry_run),
